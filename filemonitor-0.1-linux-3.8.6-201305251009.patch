@@ -92,7 +92,6 @@ diff -rup linux-3.8.6/fs/dcache.c linux-3.8.6-mm/fs/dcache.c
  }
  
  /*
-Only in linux-3.8.6-mm/fs: dcache.c.orig
 diff -rup linux-3.8.6/fs/locks.c linux-3.8.6-mm/fs/locks.c
 --- linux-3.8.6/fs/locks.c	2013-04-05 11:49:06.000000000 -0500
 +++ linux-3.8.6-mm/fs/locks.c	2013-06-04 13:23:16.694497049 -0500
@@ -144,7 +143,6 @@ diff -rup linux-3.8.6/fs/namespace.c linux-3.8.6-mm/fs/namespace.c
  dput_out:
  	path_put(&path);
  	return retval;
-Only in linux-3.8.6-mm/fs: namespace.c.orig
 diff -rup linux-3.8.6/fs/notify/Kconfig linux-3.8.6-mm/fs/notify/Kconfig
 --- linux-3.8.6/fs/notify/Kconfig	2013-04-05 11:49:06.000000000 -0500
 +++ linux-3.8.6-mm/fs/notify/Kconfig	2013-06-04 13:23:16.694497049 -0500
@@ -185,7 +183,6 @@ diff -rup linux-3.8.6/fs/notify/Makefile linux-3.8.6-mm/fs/notify/Makefile
  obj-y			+= dnotify/
  obj-y			+= inotify/
  obj-y			+= fanotify/
-Only in linux-3.8.6-mm/fs/notify: Makefile.orig
 diff -rup linux-3.8.6/fs/readdir.c linux-3.8.6-mm/fs/readdir.c
 --- linux-3.8.6/fs/readdir.c	2013-04-05 11:49:06.000000000 -0500
 +++ linux-3.8.6-mm/fs/readdir.c	2013-06-04 13:23:16.694497049 -0500
@@ -508,7 +505,6 @@ diff -rup linux-3.8.6/kernel/sysctl.c linux-3.8.6-mm/kernel/sysctl.c
  #ifdef CONFIG_EPOLL
  	{
  		.procname	= "epoll",
-Only in linux-3.8.6-mm/kernel: sysctl.c.orig
 diff -rup linux-3.8.6/mm/memory.c linux-3.8.6-mm/mm/memory.c
 --- linux-3.8.6/mm/memory.c	2013-04-05 11:49:06.000000000 -0500
 +++ linux-3.8.6-mm/mm/memory.c	2013-06-04 13:23:16.704497049 -0500
@@ -520,4 +516,3 @@ diff -rup linux-3.8.6/mm/memory.c linux-3.8.6-mm/mm/memory.c
  
  /**
   * access_remote_vm - access another process' address space
-Only in linux-3.8.6-mm/mm: memory.c.orig
