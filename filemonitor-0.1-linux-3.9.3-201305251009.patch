@@ -1,6 +1,6 @@
-diff -rup linux-3.9.3/fs/dcache.c linux-3.9.3-mm/fs/dcache.c
+diff -rupN -x '*.orig' linux-3.9.3/fs/dcache.c linux-3.9.3-mm/fs/dcache.c
 --- linux-3.9.3/fs/dcache.c	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/fs/dcache.c	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/fs/dcache.c	2013-06-10 02:12:51.323421051 -0500
 @@ -217,6 +217,17 @@ static inline int dentry_cmp(const struc
  static void __d_free(struct rcu_head *head)
  {
@@ -92,9 +92,9 @@ diff -rup linux-3.9.3/fs/dcache.c linux-3.9.3-mm/fs/dcache.c
  }
  
  /*
-diff -rup linux-3.9.3/fs/locks.c linux-3.9.3-mm/fs/locks.c
+diff -rupN -x '*.orig' linux-3.9.3/fs/locks.c linux-3.9.3-mm/fs/locks.c
 --- linux-3.9.3/fs/locks.c	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/fs/locks.c	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/fs/locks.c	2013-06-10 02:12:51.323421051 -0500
 @@ -124,6 +124,7 @@
  #include <linux/slab.h>
  #include <linux/syscalls.h>
@@ -107,7 +107,7 @@ diff -rup linux-3.9.3/fs/locks.c linux-3.9.3-mm/fs/locks.c
  	if (error)
  		goto out_free;
  
-+	fsnotify_flock(filp->f_path.dentry);
++	fsnotify_flock(f.file->f_path.dentry);
 +
  	if (f.file->f_op && f.file->f_op->flock)
  		error = f.file->f_op->flock(f.file,
@@ -121,9 +121,9 @@ diff -rup linux-3.9.3/fs/locks.c linux-3.9.3-mm/fs/locks.c
  	if (filp->f_op && filp->f_op->lock)
  		return filp->f_op->lock(filp, cmd, fl);
  	else
-diff -rup linux-3.9.3/fs/namespace.c linux-3.9.3-mm/fs/namespace.c
+diff -rupN -x '*.orig' linux-3.9.3/fs/namespace.c linux-3.9.3-mm/fs/namespace.c
 --- linux-3.9.3/fs/namespace.c	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/fs/namespace.c	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/fs/namespace.c	2013-06-10 02:12:51.323421051 -0500
 @@ -1187,6 +1187,8 @@ static int do_umount(struct mount *mnt, 
  			return -EAGAIN;
  	}
@@ -143,9 +143,614 @@ diff -rup linux-3.9.3/fs/namespace.c linux-3.9.3-mm/fs/namespace.c
  dput_out:
  	path_put(&path);
  	return retval;
-diff -rup linux-3.9.3/fs/notify/Kconfig linux-3.9.3-mm/fs/notify/Kconfig
+diff -rupN -x '*.orig' linux-3.9.3/fs/notify/filemon.c linux-3.9.3-mm/fs/notify/filemon.c
+--- linux-3.9.3/fs/notify/filemon.c	1969-12-31 18:00:00.000000000 -0600
++++ linux-3.9.3-mm/fs/notify/filemon.c	2013-06-10 02:12:51.323421051 -0500
+@@ -0,0 +1,601 @@
++/*
++ * fs/filemon.c - dentry-based file event notifications
++ *
++ * WARNING! This patch has been designed as EXPERIMENTAL. Its usage
++ * is DANGEROUS, because some filesystems could get exhausted by the
++ * masses of ORPHAN INODES!
++ *
++ * Copyright (C) 2012 1&1 Internet AG - http://www.1und1.de
++ *
++ * Authors:
++ * Stela Suciu <stela.suciu@gmail.com>, <stela.suciu@1and1.ro>
++ * Thomas Schoebel-Theuer <thomas.schoebel-theuer@1und1.de>
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation; either version 2, or (at your option) any
++ * later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ */
++
++#include <linux/delay.h>
++#include <linux/module.h>
++#include <linux/spinlock.h>
++#include <linux/fs.h>
++#include <asm/uaccess.h>
++#include <linux/mount.h>
++#include <linux/sysctl.h>
++#include <linux/nsproxy.h>
++#include <linux/fs_struct.h>
++#include <linux/mnt_namespace.h>
++#include <linux/mount.h>
++#include <linux/slab.h>
++#include <linux/vfs.h>
++#include <linux/filemon.h>
++#include <linux/wait.h>
++
++#include "../internal.h"
++#include "../mount.h"
++
++DEFINE_SEMAPHORE(filemon_mutex);
++EXPORT_SYMBOL(filemon_mutex);
++
++DEFINE_SPINLOCK(filemon_dirty_lock);
++EXPORT_SYMBOL(filemon_dirty_lock);
++
++DECLARE_WAIT_QUEUE_HEAD(filemon_wait);
++EXPORT_SYMBOL(filemon_wait);
++
++struct filemon_base filemon_base[FILEMON_MAX] = {
++	{ LIST_HEAD_INIT(filemon_base[0].fb_dirty), 0},
++	{ LIST_HEAD_INIT(filemon_base[1].fb_dirty), 0},
++};
++EXPORT_SYMBOL(filemon_base);
++
++int filemon_max_count = 200000;
++EXPORT_SYMBOL(filemon_max_count);
++
++unsigned int filemon_mask = FILEMON_OPEN | FILEMON_CLOSE | FILEMON_READ | FILEMON_STAT | FILEMON_READDIR | FILEMON_FLOCK | FILEMON_PLOCK;
++EXPORT_SYMBOL(filemon_mask);
++
++int filemon_active = 0;
++EXPORT_SYMBOL(filemon_active);
++
++int filemon_overflow = 0;
++EXPORT_SYMBOL(filemon_overflow);
++
++int filemon_msleep = 0;
++EXPORT_SYMBOL(filemon_msleep);
++
++int filemon_version = 5;
++EXPORT_SYMBOL(filemon_version);
++
++/*
++ * Remember this dentry in the active dirty list and pin it via dget().
++ * It remains there until you remove it by d_get_dirty()
++ * and finally dput() it.
++ */
++void d_dirtify(struct dentry *dentry, int flag_bit)
++{
++	struct dentry * unpin = dentry;
++	struct filemon_info *info;
++	int wakeup = 0;
++
++	if(flag_bit < 0 || flag_bit >= FM_MAX)
++		BUG();
++
++	if((1u << flag_bit) & filemon_mask)
++		return;
++
++	dget(dentry);
++
++        spin_lock(&filemon_dirty_lock);
++
++	// don't dirtify on inactive / currently umounting filesystems
++        if(!(dentry->d_sb->s_flags & MS_ACTIVE)) {
++		goto done;
++        }
++
++	// suppress special filesystems like /proc, but not nfs
++        if(!(dentry->d_sb->s_type->fs_flags & FS_REQUIRES_DEV) && strcmp(dentry->d_sb->s_type->name, "nfs") && strcmp(dentry->d_sb->s_type->name, "nfs4")) {
++		goto done;
++        }
++
++	// is the limit exceeded?
++	if(filemon_base[0].fb_dirty_count + filemon_base[1].fb_dirty_count >= filemon_max_count) {
++	        filemon_overflow = 1;
++	}
++
++	// is filemon overflow set?
++	if(filemon_overflow) {
++		if(filemon_base[0].fb_dirty_count + filemon_base[1].fb_dirty_count > 0 &&
++		   !spin_is_locked(&dentry->d_lock)) {
++			__filemon_killall_dirty(NULL);
++			goto unpin;
++		}
++		goto done;
++	}
++
++	// now we remember what we want to know later...
++	info = &dentry->d_filemon[filemon_active];
++	info->fi_ctime = current_kernel_time();
++	info->fi_fpid = current->pid;
++	info->fi_fflags |= (1u << flag_bit);
++#ifdef CONFIG_FILEMON_COUNTERS
++	info->fi_counter[flag_bit]++;
++#endif
++
++	// has it alread been dirtified before? ensure correct bookkeeping.
++	if(list_empty(&info->fi_dirty)) {
++	        wakeup = !filemon_base[filemon_active].fb_dirty_count++;
++		unpin = NULL;
++	}
++
++	// now do the real work...
++	list_del(&info->fi_dirty);
++	list_add_tail(&info->fi_dirty, &filemon_base[filemon_active].fb_dirty);
++
++done:
++        spin_unlock(&filemon_dirty_lock);
++	if(wakeup) {
++		wake_up(&filemon_wait);
++	}
++
++unpin:
++	if(unpin)
++		dput(dentry);
++
++}
++EXPORT_SYMBOL(d_dirtify);
++
++static struct vfsmount *get_vfsmount(struct dentry *root_dentry)
++{
++       struct list_head *lhead;
++       struct mount *mnt = NULL;
++       struct mnt_namespace *ns = current->nsproxy->mnt_ns;
++
++       if(ns) {
++               get_mnt_ns(ns);
++               list_for_each(lhead, &ns->list)
++               {
++                       mnt = list_entry(lhead, struct mount, mnt_list);
++                       if (mnt->mnt.mnt_root == root_dentry)
++                       {
++                               mntget(&mnt->mnt);
++			       put_mnt_ns(ns);
++                               return &mnt->mnt;
++                       }
++               }
++               put_mnt_ns(ns);
++       }
++       return NULL;
++}
++
++static ssize_t emit_first(struct dentry *dentry, struct filemon_info *info, char *rbuf, ssize_t bufsize, ssize_t namelen)
++{
++        ssize_t len;
++	char str[96];
++#ifdef CONFIG_FILEMON_COUNTERS
++	int i;
++	int add;
++#endif
++	len = snprintf(str, sizeof(str), 
++		"%012ld.%09ld %08x %024ld %010u %06d %04d ",
++		(unsigned long)info->fi_ctime.tv_sec,
++		info->fi_ctime.tv_nsec,
++		info->fi_fflags,
++		(dentry->d_inode ? dentry->d_inode->i_ino : 0l), 
++		(unsigned int)(dentry->d_inode ? dentry->d_inode->i_generation : 0), 
++		info->fi_fpid,
++		(int)namelen);
++	if(len > bufsize)
++	        return -ENOMEM;
++	if(len < 0)
++		return -EFAULT;
++
++	memcpy(rbuf-len, str, len);
++
++#ifdef CONFIG_FILEMON_COUNTERS
++	for(i = FM_MAX-1; i >=0; i--) {
++		add = snprintf(str, sizeof(str), "%03d ", info->fi_counter[i]);
++		len += add;
++		if(len > bufsize)
++			return -ENOMEM;
++		memcpy(rbuf-len, str, add);
++	}
++#endif
++	return len;
++}
++
++static ssize_t emit_element(struct dentry *dentry, char *rbuf, ssize_t bufsize)
++{
++        ssize_t len = dentry->d_name.len;
++	if(len+1 > bufsize)
++		return -ENOMEM;
++	memcpy(rbuf-len, dentry->d_name.name, len);
++	memcpy(rbuf-len-1, "/", 1);
++	
++	return len+1;
++}
++
++static ssize_t emit_last(struct dentry *dentry, char *rbuf, ssize_t bufsize)
++{
++	ssize_t len = 1;
++	if(bufsize < len)
++		return -ENOMEM;
++	memcpy(rbuf-1, "\n", 1);
++	return len;
++}
++
++static ssize_t emit_slash(struct dentry *dentry, char* rbuf, ssize_t bufsize)
++{
++	if(bufsize < 1)
++		return -ENOMEM;
++	memcpy(rbuf-1, "/", 1);
++	return 1;
++}
++
++
++static ssize_t emit_path(struct dentry *dentry, struct dentry *root, struct vfsmount *rootmnt, struct filemon_info *info, char *rbuf, ssize_t bufsize)
++{
++        ssize_t pos, ipos;
++	ssize_t status;
++	struct dentry *original = dentry;
++	struct mount *mnt = NULL;
++	struct vfsmount *vfsmnt = NULL, *original_vfsmnt = NULL;
++
++	ipos = emit_last(dentry, rbuf, bufsize);
++	if(ipos < 0)
++		return ipos;
++
++	pos = ipos;
++	
++	/* try to find a vfsmount corresponding to the superblock dentry
++	 */
++	if((vfsmnt = get_vfsmount(dentry->d_sb->s_root)))
++		original_vfsmnt = vfsmnt;
++	
++	while(dentry != root || vfsmnt != rootmnt) {
++		if(IS_ROOT(dentry) || (vfsmnt && dentry == vfsmnt->mnt_root)) {
++			/* if initial match attempt did not succeed, try again
++			 * with the first encountered root dentry (works for nfs4)
++			 */
++			if(!vfsmnt) {
++				if((vfsmnt = get_vfsmount(dentry)))
++					original_vfsmnt = vfsmnt;
++				else break;
++			}
++		
++			br_read_lock(&vfsmount_lock);
++			mnt = real_mount(vfsmnt);
++			if(mnt->mnt_parent == mnt) {
++				br_read_unlock(&vfsmount_lock);
++				break;
++			}
++			dentry = mnt->mnt_mountpoint;
++			mnt = mnt->mnt_parent;
++			vfsmnt = &mnt->mnt;
++			br_read_unlock(&vfsmount_lock);
++		}
++
++		status = emit_element(dentry, rbuf - pos, bufsize - pos);
++		if(status < 0) {
++			if(original_vfsmnt)
++				mntput(original_vfsmnt);
++			return status;
++		}
++
++		dentry = dentry->d_parent;
++		pos += status;
++	}
++	
++	if(original_vfsmnt)
++		mntput(original_vfsmnt);
++
++	/* if our dentry was root, resolve the path to "/" 
++	 */
++	if(pos == ipos) {
++		status = emit_slash(dentry, rbuf - pos, bufsize - pos);	
++		if(status < 0)
++			return status;
++		pos += status;
++	}
++
++	status = emit_first(original, info, rbuf - pos, bufsize - pos, pos - ipos);
++	if(status < 0)
++	        return status;
++	return pos + status;
++}
++
++static ssize_t do_entry(struct dentry *dentry, struct filemon_info *info, char *rbuf, ssize_t bufsize)
++{
++ 	struct dentry *root;
++	struct vfsmount *rootmnt;
++	ssize_t status;
++
++	spin_lock(&current->fs->lock);
++	root = dget(current->fs->root.dentry);
++	rootmnt = mntget(current->fs->root.mnt);
++	spin_unlock(&current->fs->lock);
++
++	status = emit_path(dentry, root, rootmnt, info, rbuf, bufsize);
++
++	mntput(rootmnt);
++	dput(root);
++	return status;
++}
++
++static ssize_t __sched do_filemon_read(char __user *buf, ssize_t bufsize, int active, int wait)
++{
++	struct dentry *dentry = NULL;
++        ssize_t pos = 0;
++	ssize_t status = 0;
++	char *reverse_buffer;
++	struct filemon_info info;
++
++	if(!(reverse_buffer = kmalloc(PAGE_SIZE*2, GFP_KERNEL | GFP_NOFS)))
++		return -ENOMEM;
++	
++	down(&filemon_mutex);
++        for(;;) {
++		if(signal_pending(current)) {
++			if(!pos)
++				pos = -ERESTARTSYS;
++			break;
++		}
++
++	        dentry = d_get_dirty(active, &info);
++
++		if(!dentry) {
++			if(!wait || pos > 0)
++				break;
++
++			up(&filemon_mutex);
++			wait_event_interruptible(filemon_wait, filemon_base[active].fb_dirty_count > 0);
++			if(filemon_msleep > 0)
++				msleep(filemon_msleep);
++
++			down(&filemon_mutex);
++			continue;
++		}
++
++		status = do_entry(dentry, &info, reverse_buffer + PAGE_SIZE*2, min(bufsize - pos, (ssize_t)PAGE_SIZE*2));
++
++		if(status < 0)
++		        break;
++
++		if(copy_to_user(buf + pos, reverse_buffer + PAGE_SIZE*2 - status, status)) {
++			status = -EFAULT;
++			break;
++		}
++
++		pos += status;
++		dput(dentry);
++		dentry = NULL;
++	}
++	/* sorry: it is over. we had to remove it (race avoidance),
++	 * thus we have to reenter it now.
++	 */
++	if(dentry) {
++		bool ok = d_reenter_dirty(dentry, &info, active);
++		/* it might have been already entered in the meantime by d_dirtify(),
++		 * thus we have to correct the d_count in this case...
++		 */
++		if(!ok)
++			dput(dentry);
++	}
++	up(&filemon_mutex);
++
++	kfree(reverse_buffer);
++
++	// only report errors when nothing could be delivered
++	if(!pos)
++	        return status;
++	return pos;
++}
++
++static int __filemon_sysctl_handler(void __user *buffer, size_t *length, loff_t *ppos, int transact, int wait)
++{
++        ssize_t res;
++	int active;
++
++	if (!*length) {
++		return 0;
++	}
++	
++	/* check if the overflow_flag is set, in which case
++	 * we should kill all pinned dentries
++	 */
++	if(filemon_overflow) {
++		down(&filemon_mutex);
++		spin_lock(&filemon_dirty_lock);
++		
++		if(filemon_base[0].fb_dirty_count + filemon_base[1].fb_dirty_count > 0)
++			__filemon_killall_dirty(NULL);
++		else
++			spin_unlock(&filemon_dirty_lock);
++		up(&filemon_mutex);
++	}
++
++	// shall we switch the active list?
++	if(transact && !*ppos) {
++		spin_lock(&filemon_dirty_lock);
++		if(list_empty(&filemon_base[filemon_active ^ 1].fb_dirty)) {
++		        filemon_active ^= 1;
++		}
++		spin_unlock(&filemon_dirty_lock);
++	}
++
++	active = transact ? filemon_active ^ 1 : filemon_active;
++	res = do_filemon_read(buffer, *length, active, wait);
++
++	if(res >= 0) {
++	        *ppos += res;
++		*length = res;
++		return 0;
++	}
++
++	*length = res;
++	return res;
++}
++
++static int filemon_sysctl_handler(ctl_table *table, int write, 
++         void __user *buffer, size_t *length, loff_t *ppos)
++{
++        return __filemon_sysctl_handler(buffer, length, ppos, 0, 0);
++}
++
++static int filemon_sysctl_handler_transactional(ctl_table *table, int write, 
++         void __user *buffer, size_t *length, loff_t *ppos)
++{
++        return __filemon_sysctl_handler(buffer, length, ppos, 1, 0);
++}
++
++static int filemon_sysctl_handler_blocking(ctl_table *table, int write, 
++         void __user *buffer, size_t *length, loff_t *ppos)
++{
++        return __filemon_sysctl_handler(buffer, length, ppos, 0, 1);
++}
++
++static int filemon_sysctl_handler_transactional_blocking(ctl_table *table, int write, 
++         void __user *buffer, size_t *length, loff_t *ppos)
++{
++        return __filemon_sysctl_handler(buffer, length, ppos, 1, 1);
++}
++
++ctl_table filemon_table[] = {
++	{
++		.procname	= "version",
++		.data		= &filemon_version,
++		.maxlen		= sizeof(filemon_version),
++		.mode		= 0444,
++		.proc_handler	= &proc_dointvec_minmax,
++	},
++	{
++		.procname	= "filemon",
++		.mode		= 0400,
++		.proc_handler	= &filemon_sysctl_handler,
++	},
++	{
++		.procname	= "filemon-transactional",
++		.mode		= 0400,
++		.proc_handler	= &filemon_sysctl_handler_transactional,
++	},
++	{
++		.procname	= "filemon-blocking",
++		.mode		= 0400,
++		.proc_handler	= &filemon_sysctl_handler_blocking,
++	},
++	{
++		.procname	= "filemon-transactional-blocking",
++		.mode		= 0400,
++		.proc_handler	= &filemon_sysctl_handler_transactional_blocking,
++	},
++	{
++		.procname	= "dirty_count[0]",
++		.data		= &filemon_base[0].fb_dirty_count,
++		.maxlen		= sizeof(int),
++		.mode		= 0400,
++		.proc_handler	= &proc_dointvec_minmax,
++	},
++	{
++		.procname	= "dirty_count[1]",
++		.data		= &filemon_base[1].fb_dirty_count,
++		.maxlen		= sizeof(int),
++		.mode		= 0400,
++		.proc_handler	= &proc_dointvec_minmax,
++	},
++	{
++		.procname	= "mask",
++		.data		= &filemon_mask,
++		.maxlen		= sizeof(filemon_mask),
++		.mode		= 0600,
++		.proc_handler	= &proc_dointvec_minmax,
++	},
++	{
++		.procname	= "max_count",
++		.data		= &filemon_max_count,
++		.maxlen		= sizeof(filemon_max_count),
++		.mode		= 0600,
++		.proc_handler	= &proc_dointvec_minmax,
++	},
++	{
++		.procname	= "overflow",
++		.data		= &filemon_overflow,
++		.maxlen		= sizeof(filemon_overflow),
++		.mode		= 0600,
++		.proc_handler	= &proc_dointvec_minmax,
++	},
++	{
++		.procname	= "msleep",
++		.data		= &filemon_msleep,
++		.maxlen		= sizeof(filemon_msleep),
++		.mode		= 0600,
++		.proc_handler	= &proc_dointvec_minmax,
++	},
++	{ }
++};
++
++/* Free all dentries from the given superblock.
++ * If sb==NULL, globally free all (used on overflow).
++ * Called with the filemon_dirty_lock taken; it releases it.
++ */
++void __filemon_killall_dirty(struct super_block *sb)
++{
++	struct list_head *tmp;
++	struct dentry * dentry;
++	struct list_head remember[FILEMON_MAX] = {
++		LIST_HEAD_INIT(remember[0]),
++#if FILEMON_MAX > 1
++		LIST_HEAD_INIT(remember[1]),
++#endif
++#if FILEMON_MAX > 2
++		LIST_HEAD_INIT(remember[2]),
++#endif
++	};
++	int i;
++	for(i = 0; i < FILEMON_MAX; i++) {
++		while(!list_empty(&filemon_base[i].fb_dirty)) {
++			tmp = filemon_base[i].fb_dirty.next;
++			dentry = list_entry(tmp, struct dentry, d_filemon[i].fi_dirty);
++			if(!sb || dentry->d_sb == sb) {
++			        __d_free_dirty(dentry, i);
++				spin_unlock(&filemon_dirty_lock);
++				dput(dentry);
++				spin_lock(&filemon_dirty_lock);
++			} else {
++				/* note: it does not matter when it is removed from remember
++				 * during the next spin_unlock(). it just does the work
++				 * of the later list_splice() in advance.
++				 */
++				list_move_tail(&dentry->d_filemon[i].fi_dirty, &remember[i]);
++			}
++		}
++		list_splice_tail(&remember[i], &filemon_base[i].fb_dirty);
++	}
++#if 0 // only for testing: put stress on this
++	if(filemon_max_count > 50)
++		filemon_max_count = 0;
++	filemon_max_count++;
++	filemon_overflow = 0;
++#endif
++	spin_unlock(&filemon_dirty_lock);
++}
++EXPORT_SYMBOL(__filemon_killall_dirty);
++
++/* Free all dentries from the given superblock.
++ * If sb==NULL, globally free all (used on overflow).
++ */
++void filemon_killall_dirty(struct super_block *sb)
++{
++
++	down(&filemon_mutex);
++	spin_lock(&filemon_dirty_lock);
++	__filemon_killall_dirty(sb);
++	up(&filemon_mutex);
++}
++EXPORT_SYMBOL(filemon_killall_dirty);
+diff -rupN -x '*.orig' linux-3.9.3/fs/notify/Kconfig linux-3.9.3-mm/fs/notify/Kconfig
 --- linux-3.9.3/fs/notify/Kconfig	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/fs/notify/Kconfig	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/fs/notify/Kconfig	2013-06-10 02:12:51.323421051 -0500
 @@ -1,6 +1,25 @@
  config FSNOTIFY
  	def_bool n
@@ -172,9 +777,9 @@ diff -rup linux-3.9.3/fs/notify/Kconfig linux-3.9.3-mm/fs/notify/Kconfig
  source "fs/notify/dnotify/Kconfig"
  source "fs/notify/inotify/Kconfig"
  source "fs/notify/fanotify/Kconfig"
-diff -rup linux-3.9.3/fs/notify/Makefile linux-3.9.3-mm/fs/notify/Makefile
+diff -rupN -x '*.orig' linux-3.9.3/fs/notify/Makefile linux-3.9.3-mm/fs/notify/Makefile
 --- linux-3.9.3/fs/notify/Makefile	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/fs/notify/Makefile	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/fs/notify/Makefile	2013-06-10 02:12:51.323421051 -0500
 @@ -1,6 +1,7 @@
  obj-$(CONFIG_FSNOTIFY)		+= fsnotify.o notification.o group.o inode_mark.o \
  				   mark.o vfsmount_mark.o fdinfo.o
@@ -183,9 +788,9 @@ diff -rup linux-3.9.3/fs/notify/Makefile linux-3.9.3-mm/fs/notify/Makefile
  obj-y			+= dnotify/
  obj-y			+= inotify/
  obj-y			+= fanotify/
-diff -rup linux-3.9.3/fs/readdir.c linux-3.9.3-mm/fs/readdir.c
+diff -rupN -x '*.orig' linux-3.9.3/fs/readdir.c linux-3.9.3-mm/fs/readdir.c
 --- linux-3.9.3/fs/readdir.c	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/fs/readdir.c	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/fs/readdir.c	2013-06-10 02:12:51.323421051 -0500
 @@ -17,6 +17,7 @@
  #include <linux/security.h>
  #include <linux/syscalls.h>
@@ -202,9 +807,9 @@ diff -rup linux-3.9.3/fs/readdir.c linux-3.9.3-mm/fs/readdir.c
  	}
  	mutex_unlock(&inode->i_mutex);
  out:
-diff -rup linux-3.9.3/fs/stat.c linux-3.9.3-mm/fs/stat.c
+diff -rupN -x '*.orig' linux-3.9.3/fs/stat.c linux-3.9.3-mm/fs/stat.c
 --- linux-3.9.3/fs/stat.c	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/fs/stat.c	2013-06-04 13:30:02.424487651 -0500
++++ linux-3.9.3-mm/fs/stat.c	2013-06-10 02:13:51.433419659 -0500
 @@ -14,6 +14,7 @@
  #include <linux/security.h>
  #include <linux/syscalls.h>
@@ -217,14 +822,14 @@ diff -rup linux-3.9.3/fs/stat.c linux-3.9.3-mm/fs/stat.c
  	struct inode *inode = path->dentry->d_inode;
  	int retval;
  
-+	fsnotify_stat(dentry);
++	fsnotify_stat(path->dentry);
 +
  	retval = security_inode_getattr(path->mnt, path->dentry);
  	if (retval)
  		return retval;
-diff -rup linux-3.9.3/include/linux/dcache.h linux-3.9.3-mm/include/linux/dcache.h
+diff -rupN -x '*.orig' linux-3.9.3/include/linux/dcache.h linux-3.9.3-mm/include/linux/dcache.h
 --- linux-3.9.3/include/linux/dcache.h	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/include/linux/dcache.h	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/include/linux/dcache.h	2013-06-10 02:12:51.323421051 -0500
 @@ -9,6 +9,8 @@
  #include <linux/seqlock.h>
  #include <linux/cache.h>
@@ -244,9 +849,253 @@ diff -rup linux-3.9.3/include/linux/dcache.h linux-3.9.3-mm/include/linux/dcache
  };
  
  /*
-diff -rup linux-3.9.3/include/linux/fsnotify.h linux-3.9.3-mm/include/linux/fsnotify.h
+diff -rupN -x '*.orig' linux-3.9.3/include/linux/filemon_defs.h linux-3.9.3-mm/include/linux/filemon_defs.h
+--- linux-3.9.3/include/linux/filemon_defs.h	1969-12-31 18:00:00.000000000 -0600
++++ linux-3.9.3-mm/include/linux/filemon_defs.h	2013-06-10 02:12:51.323421051 -0500
+@@ -0,0 +1,91 @@
++#ifndef __LINUX_FILEMON_DEFS_H
++#define __LINUX_FILEMON_DEFS_H
++
++/*
++ * include/linux/filemon_defs.h - dentry-based file event notifications
++ *
++ * WARNING! This patch has been designed as EXPERIMENTAL. Its usage
++ * is DANGEROUS, because some filesystems could get exhausted by the
++ * masses of ORPHAN INODES!
++ *
++ * Copyright (C) 2012 1&1 Internet AG - http://www.1und1.de
++ *
++ * Authors:
++ * Stela Suciu <stela.suciu@1and1.ro>
++ * Thomas Schoebel-Theuer <thomas.schoebel-theuer@1und1.de>
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation; either version 2, or (at your option) any
++ * later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ */
++
++enum filemon_type {
++	FM_MOUNT,
++	FM_UMOUNT,
++	FM_NEW = 4,
++	FM_CREATE,
++	FM_LINK,
++	FM_MKDIR,
++	FM_DELETE,
++	FM_MOVED_FROM,
++	FM_MOVED_TO,
++	FM_OPEN = 12,
++	FM_CLOSE,
++	FM_READ,
++	FM_WRITE,
++	FM_STAT,
++	FM_READDIR,
++	FM_MODIFY = 20,
++	FM_ATTR,
++	FM_XATTR,
++	FM_FLOCK = 24,
++	FM_PLOCK,
++	// this must remain last
++	FM_MAX
++};
++
++#define FILEMON_MOUNT                   0x0000001
++#define FILEMON_UMOUNT                  0x0000002
++#define FILEMON_NEW                     0x0000010
++#define FILEMON_CREATE                  0x0000020
++#define FILEMON_LINK                    0x0000040
++#define FILEMON_MKDIR                   0x0000080
++#define FILEMON_DELETE                  0x0000100
++#define FILEMON_MOVED_FROM              0x0000200
++#define FILEMON_MOVED_TO                0x0000400
++#define FILEMON_OPEN                    0x0001000
++#define FILEMON_CLOSE                   0x0002000
++#define FILEMON_READ                    0x0004000
++#define FILEMON_WRITE                   0x0008000
++#define FILEMON_STAT                    0x0010000
++#define FILEMON_READDIR                 0x0020000
++#define FILEMON_MODIFY                  0x0100000
++#define FILEMON_ATTR                    0x0200000
++#define FILEMON_XATTR                   0x0400000
++#define FILEMON_FLOCK                   0x1000000
++#define FILEMON_PLOCK                   0x2000000
++
++#define FILEMON_MAX 2
++
++struct filemon_info {
++        struct list_head fi_dirty;  /* membership in the corresponding dirty list */
++	struct timespec  fi_ctime;  /* timestamp of last dirtifying */
++	pid_t            fi_fpid;   /* pid of last dirtifying process */
++	unsigned int     fi_fflags; /* filemon flags (see above defines) */
++#ifdef CONFIG_FILEMON_COUNTERS
++	int              fi_counter[FM_MAX];
++#endif
++};
++
++struct filemon_base {
++        struct list_head fb_dirty;  /* head of dirty list */
++	int fb_dirty_count;         /* #entries in list */
++};
++
++#endif
+diff -rupN -x '*.orig' linux-3.9.3/include/linux/filemon.h linux-3.9.3-mm/include/linux/filemon.h
+--- linux-3.9.3/include/linux/filemon.h	1969-12-31 18:00:00.000000000 -0600
++++ linux-3.9.3-mm/include/linux/filemon.h	2013-06-10 02:12:51.323421051 -0500
+@@ -0,0 +1,145 @@
++#ifndef __LINUX_FILEMON_H
++#define __LINUX_FILEMON_H
++
++/*
++ * include/linux/filemon.h - dentry-based file event notifications
++ *
++ * WARNING! This patch has been designed as EXPERIMENTAL. Its usage
++ * is DANGEROUS, because some filesystems could get exhausted by the
++ * masses of ORPHAN INODES!
++ *
++ * Copyright (C) 2012 1&1 Internet AG - http://www.1und1.de
++ *
++ * Authors:
++ * Stela Suciu <stela.suciu@gmail.com>, <stela.suciu@1and1.ro>
++ * Thomas Schoebel-Theuer <thomas.schoebel-theuer@1und1.de>
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation; either version 2, or (at your option) any
++ * later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ */
++
++#include <linux/filemon_defs.h>
++
++#ifdef __KERNEL__
++
++#include <asm/atomic.h>
++#include <linux/list.h>
++#include <linux/spinlock.h>
++#include <linux/semaphore.h>
++#include <linux/cache.h>
++#include <linux/rcupdate.h>
++#include <linux/mnt_namespace.h>
++#include <linux/fs.h>
++#include <linux/mm.h>
++
++#ifdef CONFIG_FILEMON
++
++extern struct semaphore filemon_mutex;   /* for atomicity of read() */
++extern spinlock_t filemon_dirty_lock;    /* to protect the lists */
++extern wait_queue_head_t filemon_wait;   /* event queue for waiting reader */
++extern struct filemon_base filemon_base[FILEMON_MAX]; /* dirty lists */
++extern int filemon_max_count;            /* max allowed pinnings */
++extern unsigned int filemon_mask;        /* event mask */
++extern int filemon_active;               /* which one is active */
++extern int filemon_overflow;             /* overflow has occurred */
++
++extern void filemon_killall_dirty(struct super_block *sb);
++extern void __filemon_killall_dirty(struct super_block *sb);
++
++extern void d_dirtify(struct dentry *dentry, int flag_bit);
++
++static inline
++bool __d_free_dirty(struct dentry * dentry, int active)
++{
++	struct filemon_info *info = &dentry->d_filemon[active];
++	bool ok = !list_empty(&info->fi_dirty);
++	if(ok) {
++		list_del_init(&info->fi_dirty);
++		filemon_base[active].fb_dirty_count--;
++	}
++	return ok;
++}
++
++static inline
++bool __d_reenter_dirty(struct dentry * dentry, int active)
++{
++	struct filemon_info *info = &dentry->d_filemon[active];
++	bool ok = !!list_empty(&info->fi_dirty);
++	if(ok) {
++		list_add(&info->fi_dirty, &filemon_base[active].fb_dirty);
++		filemon_base[active].fb_dirty_count++;
++	}
++	return ok;
++}
++
++static inline
++bool d_reenter_dirty(struct dentry * dentry, struct filemon_info *copy, int active)
++{
++#ifdef CONFIG_FILEMON_COUNTERS
++	int i;
++#endif
++	bool ok;
++
++        spin_lock(&filemon_dirty_lock);
++	dentry->d_filemon[active].fi_fflags |= copy->fi_fflags;
++#ifdef CONFIG_FILEMON_COUNTERS
++	for(i = 0; i < FM_MAX; i++)
++		dentry->d_filemon[active].fi_counter[i] += copy->fi_counter[i];
++#endif
++	ok = __d_reenter_dirty(dentry, active);
++        spin_unlock(&filemon_dirty_lock);
++	return ok;
++}
++
++/*
++ * Get the LRU-eldest dentry from one of the global dirty lists.
++ * The caller must either dput() it later, or reenter it
++ * via d_reenter_dirty().
++ * This must not be called from interrupt context.
++ */
++static inline 
++struct dentry *d_get_dirty(int active, struct filemon_info *copy)
++{
++	struct dentry * dentry;
++	struct filemon_info *info;
++
++        spin_lock(&filemon_dirty_lock);
++
++	if(list_empty(&filemon_base[active].fb_dirty)) {
++		spin_unlock(&filemon_dirty_lock);
++		return NULL;
++	}
++
++	dentry = list_first_entry(&filemon_base[active].fb_dirty, struct dentry, d_filemon[active].fi_dirty);
++
++	__d_free_dirty(dentry, active);
++
++	info = &dentry->d_filemon[active];
++	memcpy(copy, info, sizeof(struct filemon_info));
++	info->fi_fflags = 0;
++#ifdef CONFIG_FILEMON_COUNTERS
++	memset(info->fi_counter, 0, sizeof(info->fi_counter));
++#endif
++
++        spin_unlock(&filemon_dirty_lock);
++
++	return dentry;
++}
++
++#else
++#define d_dirtify(dentry,flags)         /*empty*/
++#define d_get_dirty(active)             NULL
++#define d_free_dirty(dentry, active)      /*empty*/
++#define filemon_killall_dirty(sb) /*empty*/
++#endif
++
++#endif /* __KERNEL__ */
++
++#endif	/* __LINUX_FILEMON_H */
+diff -rupN -x '*.orig' linux-3.9.3/include/linux/fsnotify.h linux-3.9.3-mm/include/linux/fsnotify.h
 --- linux-3.9.3/include/linux/fsnotify.h	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/include/linux/fsnotify.h	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/include/linux/fsnotify.h	2013-06-10 02:12:51.323421051 -0500
 @@ -15,6 +15,27 @@
  #include <linux/audit.h>
  #include <linux/slab.h>
@@ -428,9 +1277,9 @@ diff -rup linux-3.9.3/include/linux/fsnotify.h linux-3.9.3-mm/include/linux/fsno
  	if (mask) {
  		if (S_ISDIR(inode->i_mode))
  			mask |= FS_ISDIR;
-diff -rup linux-3.9.3/include/uapi/linux/sysctl.h linux-3.9.3-mm/include/uapi/linux/sysctl.h
+diff -rupN -x '*.orig' linux-3.9.3/include/uapi/linux/sysctl.h linux-3.9.3-mm/include/uapi/linux/sysctl.h
 --- linux-3.9.3/include/uapi/linux/sysctl.h	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/include/uapi/linux/sysctl.h	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/include/uapi/linux/sysctl.h	2013-06-10 02:12:51.323421051 -0500
 @@ -80,6 +80,19 @@ enum
  	INOTIFY_MAX_QUEUED_EVENTS=3	/* max queued events per instance */
  };
@@ -459,9 +1308,9 @@ diff -rup linux-3.9.3/include/uapi/linux/sysctl.h linux-3.9.3-mm/include/uapi/li
  	FS_OCFS2=988,	/* ocfs2 */
  };
  
-diff -rup linux-3.9.3/kernel/sys.c linux-3.9.3-mm/kernel/sys.c
+diff -rupN -x '*.orig' linux-3.9.3/kernel/sys.c linux-3.9.3-mm/kernel/sys.c
 --- linux-3.9.3/kernel/sys.c	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/kernel/sys.c	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/kernel/sys.c	2013-06-10 02:12:51.323421051 -0500
 @@ -31,6 +31,7 @@
  #include <linux/cn_proc.h>
  #include <linux/getcpu.h>
@@ -478,9 +1327,9 @@ diff -rup linux-3.9.3/kernel/sys.c linux-3.9.3-mm/kernel/sys.c
  	blocking_notifier_call_chain(&reboot_notifier_list,
  		(state == SYSTEM_HALT)?SYS_HALT:SYS_POWER_OFF, NULL);
  	system_state = state;
-diff -rup linux-3.9.3/kernel/sysctl.c linux-3.9.3-mm/kernel/sysctl.c
+diff -rupN -x '*.orig' linux-3.9.3/kernel/sysctl.c linux-3.9.3-mm/kernel/sysctl.c
 --- linux-3.9.3/kernel/sysctl.c	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/kernel/sysctl.c	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/kernel/sysctl.c	2013-06-10 02:12:51.333421051 -0500
 @@ -221,6 +221,9 @@ extern struct ctl_table random_table[];
  #ifdef CONFIG_EPOLL
  extern struct ctl_table epoll_table[];
@@ -505,9 +1354,9 @@ diff -rup linux-3.9.3/kernel/sysctl.c linux-3.9.3-mm/kernel/sysctl.c
  #ifdef CONFIG_EPOLL
  	{
  		.procname	= "epoll",
-diff -rup linux-3.9.3/mm/memory.c linux-3.9.3-mm/mm/memory.c
+diff -rupN -x '*.orig' linux-3.9.3/mm/memory.c linux-3.9.3-mm/mm/memory.c
 --- linux-3.9.3/mm/memory.c	2013-05-19 13:39:04.000000000 -0500
-+++ linux-3.9.3-mm/mm/memory.c	2013-06-04 13:28:54.074489234 -0500
++++ linux-3.9.3-mm/mm/memory.c	2013-06-10 02:12:51.333421051 -0500
 @@ -4132,6 +4132,7 @@ static int __access_remote_vm(struct tas
  
  	return buf - old_buf;
