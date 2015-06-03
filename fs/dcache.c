@@ -254,6 +254,18 @@ static void __d_free(struct rcu_head *head)
 {
 	struct dentry *dentry = container_of(head, struct dentry, d_u.d_rcu);
 
+#ifdef CONFIG_FILEMON
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		struct filemon_info *info = &dentry->d_filemon[i];
+	        if (unlikely(!list_empty(&info->fi_dirty))) {
+			printk("filemon dentry %p not empty at %d\n", dentry, i);
+			return;
+		}
+	}
+#endif
+
 	kmem_cache_free(dentry_cache, dentry); 
 }
 
@@ -1417,6 +1429,8 @@ void shrink_dcache_for_umount(struct super_block *sb)
 
 	WARN(down_read_trylock(&sb->s_umount), "s_umount should've been locked");
 
+	filemon_killall_dirty(sb);
+
 	dentry = sb->s_root;
 	sb->s_root = NULL;
 	do_one_tree(dentry);
@@ -1546,7 +1560,7 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 				round_up(name->len + 1,	sizeof(unsigned long)));
 	} else  {
 		dname = dentry->d_iname;
-	}	
+	}
 
 	dentry->d_name.len = name->len;
 	dentry->d_name.hash = name->hash;
@@ -1572,6 +1586,20 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	INIT_HLIST_NODE(&dentry->d_u.d_alias);
 	INIT_LIST_HEAD(&dentry->d_child);
 	d_set_d_op(dentry, dentry->d_sb->s_d_op);
+
+#ifdef CONFIG_FILEMON
+	{
+		int i;
+		for(i = 0; i < FILEMON_MAX; i++) {
+			struct filemon_info *info = &dentry->d_filemon[i];
+			INIT_LIST_HEAD(&info->fi_dirty);
+			info->fi_fflags = 0;
+#ifdef CONFIG_FILEMON_COUNTERS
+			memset(info->fi_counter, 0, sizeof(info->fi_counter));
+#endif
+		}
+	}
+#endif
 
 	this_cpu_inc(nr_dentry);
 
@@ -2569,6 +2597,8 @@ static void __d_move(struct dentry *dentry, struct dentry *target,
 	BUG_ON(d_ancestor(dentry, target));
 	BUG_ON(d_ancestor(target, dentry));
 
+	fsnotify_d_move_from(target);
+
 	dentry_lock_for_move(dentry, target);
 
 	write_seqcount_begin(&dentry->d_seq);
@@ -2620,6 +2650,7 @@ static void __d_move(struct dentry *dentry, struct dentry *target,
 	write_seqcount_end(&dentry->d_seq);
 
 	dentry_unlock_for_move(dentry, target);
+	fsnotify_d_move_to(dentry);
 }
 
 /*

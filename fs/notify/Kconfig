@@ -2,6 +2,24 @@ config FSNOTIFY
 	def_bool n
 	select SRCU
 
+config FILEMON
+       bool "Filemonitor notification support"
+       select FSNOTIFY
+       default y
+       ---help---
+         Say Y here to enable filemonitor support.  Filemonitor is a file change
+         notification system different from inotify. It supports long-term
+         monitoring in kernel space
+         If unsure, say N.
+
+config FILEMON_COUNTERS
+       bool "Detailed hit counters for filemon"
+       depends on FILEMON
+       default n
+       ---help---
+         Enable counters for filemon, nut just flag bits.
+         Uses up more space. If unsure, say N.
+
 source "fs/notify/dnotify/Kconfig"
 source "fs/notify/inotify/Kconfig"
 source "fs/notify/fanotify/Kconfig"

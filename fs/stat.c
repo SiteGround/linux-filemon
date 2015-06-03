@@ -14,6 +14,7 @@
 #include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/pagemap.h>
+#include <linux/fsnotify.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -65,6 +66,8 @@ EXPORT_SYMBOL(vfs_getattr_nosec);
 int vfs_getattr(struct path *path, struct kstat *stat)
 {
 	int retval;
+
+	fsnotify_stat(path->dentry);
 
 	retval = security_inode_getattr(path->mnt, path->dentry);
 	if (retval)
