@@ -37,6 +37,9 @@
 #include <linux/vfs.h>
 #include <linux/filemon.h>
 #include <linux/wait.h>
+#include <linux/seq_file.h>
+#include <linux/init.h>
+#include <linux/proc_fs.h>
 
 #include "../internal.h"
 #include "../mount.h"
@@ -232,13 +235,8 @@ static ssize_t emit_last(struct dentry *dentry, char *rbuf, ssize_t bufsize)
 	return len;
 }
 
-static ssize_t emit_slash(struct dentry *dentry, char* rbuf, ssize_t bufsize)
-{
-	if(bufsize < 1)
-		return -ENOMEM;
-	memcpy(rbuf-1, "/", 1);
-	return 1;
-}
+	if (!*pos)
+		seq_puts(s, "No. Modification time\tFlags\tFilename\n");
 
 
 static ssize_t emit_path(struct dentry *dentry, struct dentry *root, struct vfsmount *rootmnt, struct filemon_info *info, char *rbuf, ssize_t bufsize)
@@ -344,8 +342,14 @@ static ssize_t __sched do_filemon_read(char __user *buf, ssize_t bufsize, int ac
 	char *reverse_buffer;
 	struct filemon_info info;
 
-	if(!(reverse_buffer = kmalloc(PAGE_SIZE*2, GFP_KERNEL | GFP_NOFS)))
-		return -ENOMEM;
+	seq_printf(s, "[%lld] %-2ld.%09ld %08x %-12s\n",
+		iter->pos,
+		(unsigned long)iter->metadata.fi_ctime.tv_sec,
+		iter->metadata.fi_ctime.tv_nsec,
+		iter->metadata.fi_fflags,
+		path);
+	return 0;
+}
 
 	down(&filemon_mutex);
         for(;;) {
@@ -421,7 +425,7 @@ static int __filemon_sysctl_handler(void __user *buffer, size_t *length, loff_t 
 		down(&filemon_mutex);
 		spin_lock(&filemon_dirty_lock);
 
-		if(filemon_base[0].fb_dirty_count + filemon_base[1].fb_dirty_count > 0)
+		if (filemon_base[0].fb_dirty_count + filemon_base[1].fb_dirty_count > 0)
 			__filemon_killall_dirty(NULL);
 		else
 			spin_unlock(&filemon_dirty_lock);
@@ -584,12 +588,6 @@ void __filemon_killall_dirty(struct super_block *sb)
 		}
 		list_splice_tail(&remember[i], &filemon_base[i].fb_dirty);
 	}
-#if 0 // only for testing: put stress on this
-	if(filemon_max_count > 50)
-		filemon_max_count = 0;
-	filemon_max_count++;
-	filemon_overflow = 0;
-#endif
 	spin_unlock(&filemon_dirty_lock);
 }
 EXPORT_SYMBOL(__filemon_killall_dirty);
@@ -606,3 +604,141 @@ void filemon_killall_dirty(struct super_block *sb)
 	up(&filemon_mutex);
 }
 EXPORT_SYMBOL(filemon_killall_dirty);
+
+static DEFINE_MUTEX(filemon_seq_mutex);
+
+
+struct filemon_seq_info {
+	struct dentry *dentry;
+	struct filemon_info metadata;
+	loff_t pos;
+};
+
+static void *filemon_seq_start(struct seq_file *s, loff_t *pos)
+{
+	struct filemon_iter_state *iter = s->private;
+
+	pr_debug("=================[filemon_seq_start]==================\n");
+
+	/* This is released from filemon_seq_stop */
+	mutex_lock(&filemon_proc_mutex);
+
+	if (filemon_listlimit && *pos >= filemon_listlimit - 1)
+		return NULL;
+
+	if (!*pos)
+		seq_puts(s, "No. Modification time\tFlags\tFilename\n");
+
+	/* If overflow is detected kill all pinned dentries */
+	if (filemon_overflow) {
+		spin_lock(&filemon_dirty_lock);
+		if (filemon_base[0].fb_dirty_count + filemon_base[1].fb_dirty_count > 0) {
+			pr_debug("[filemon] Overflow ocurred. Killed all nodes\n");
+			__filemon_killall_dirty(NULL);
+			filemon_overflow = 0;
+			return NULL;
+		} else
+			spin_unlock(&filemon_dirty_lock);
+	}
+
+	/* Begin actual stuff */
+	info = kmalloc(sizeof(*info), GFP_KERNEL | GFP_NOFS);
+	if (!info)
+		return ERR_PTR(-ENOMEM);
+
+	/* For now we are always using filemon_active (should be 0) */
+	info->dentry = d_get_dirty(filemon_active, &info->metadata);
+	info->pos = *pos;
+	if (!info->dentry) {
+		pr_info("Freeing in seq_start\n");
+		kfree(info);
+		return NULL;
+	}
+
+	return info;
+}
+
+
+static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+
+	/* When we are here we need to free the current entry and then 
+	 * get another one
+	 */
+	struct filemon_seq_info *info = v;
+
+	pr_info("[filemon_seq_next]\n");
+	/* Put the extra ref that we have taken when this
+	 * dentry was put into the dirty list
+	 */
+	dput(info->dentry);
+
+	info->dentry = d_get_dirty(filemon_active, &info->metadata);
+	*pos += 1;
+	info->pos = *pos;
+	if (!info->dentry) {
+		pr_info("freeing allocated in seq_next\n");
+		kfree(v);
+		return NULL;
+	}
+
+	return info;
+}
+
+static void filemon_seq_stop(struct seq_file *s, void *v)
+{
+	mutex_unlock(&filemon_seq_mutex);
+	if (v) {
+		pr_info("[fmon]Freeing allocated info\n");
+		kfree(v);
+	}
+
+	pr_info("==================[filemon_seq_stop]====================\n");
+}
+
+static int filemon_seq_show(struct seq_file *s, void *v)
+{
+	struct filemon_seq_info *info = v;
+	char *path = dentry_path_raw(info->dentry, str_scratch, PATH_MAX);
+	pr_info("filemon_seq_show\n");
+	if (path < 0)
+		return -EFAULT;
+
+	seq_printf(s, "[%lld] %-2ld.%09ld %08x %-12s\n",
+                iter->pos,
+                (unsigned long)iter->metadata.fi_ctime.tv_sec,
+                iter->metadata.fi_ctime.tv_nsec,
+                iter->metadata.fi_fflags,
+                path);
+
+	return 0;
+}
+
+
+
+static const struct seq_operations filemon_seq_ops = {
+	.start = filemon_seq_start,
+	.next = filemon_seq_next,
+	.stop = filemon_seq_stop,
+	.show = filemon_seq_show,
+};
+
+static int filemon_open(struct inode* inode, struct file *file)
+{
+	return seq_open(file, &filemon_seq_ops);
+}
+
+
+static const struct file_operations proc_filemon_ops = {
+	.open = filemon_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = seq_release,
+};
+
+static int proc_filemon_init(void)
+{
+	proc_create("filemon", 0, NULL, &proc_filemon_ops);
+	return 0;
+}
+late_initcall(proc_filemon_init);
