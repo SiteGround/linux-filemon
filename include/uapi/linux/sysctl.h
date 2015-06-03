@@ -80,6 +80,19 @@ enum
 	INOTIFY_MAX_QUEUED_EVENTS=3	/* max queued events per instance */
 };
 
+/* /proc/sys/fs/filemon/ */
+enum
+{
+	FILEMON_MASK=1,				/* which events to record */
+	FILEMON_MAX_COUNT=2,		/* max number of pinned dentries */
+	FILEMON_OVERFLOW=3,			/* overflow flag */
+	FILEMON_MSLEEP=4,			/* additional sleep time after wakeup (allow heuristic aggregation of notifications) */
+	FILEMON_DIRTY_COUNT_0=5,	/* number of changed files */
+	FILEMON_DIRTY_COUNT_1=6,	/* number of changed files */
+	FILEMON_DIRTY_COUNT_2=7,	/* number of changed files */
+	FILEMON_VERSION=19			/* filemon kernel patch version */
+};
+
 /* CTL_KERN names: */
 enum
 {
@@ -822,6 +835,7 @@ enum
 	FS_AIO_NR=18,	/* current system-wide number of aio requests */
 	FS_AIO_MAX_NR=19,	/* system-wide maximum number of aio requests */
 	FS_INOTIFY=20,	/* inotify submenu */
+	FS_FILEMON=21,  /* filemonitor submenu */
 	FS_OCFS2=988,	/* ocfs2 */
 };
 

@@ -3663,6 +3663,7 @@ static int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
 
 	return buf - old_buf;
 }
+EXPORT_SYMBOL(access_process_vm);
 
 /**
  * access_remote_vm - access another process' address space

@@ -18,6 +18,7 @@
 #include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/unistd.h>
+#include <linux/fsnotify.h>
 
 #include <asm/uaccess.h>
 
@@ -43,6 +44,7 @@ int iterate_dir(struct file *file, struct dir_context *ctx)
 		file->f_pos = ctx->pos;
 		fsnotify_access(file);
 		file_accessed(file);
+		fsnotify_readdir(file->f_path.dentry);
 	}
 	mutex_unlock(&inode->i_mutex);
 out:

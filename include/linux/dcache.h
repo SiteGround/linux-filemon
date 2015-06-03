@@ -10,6 +10,7 @@
 #include <linux/cache.h>
 #include <linux/rcupdate.h>
 #include <linux/lockref.h>
+#include <linux/filemon_defs.h>
 
 struct path;
 struct vfsmount;
@@ -131,8 +132,11 @@ struct dentry {
 	 */
 	union {
 		struct hlist_node d_alias;	/* inode alias list */
-	 	struct rcu_head d_rcu;
+		struct rcu_head d_rcu;
 	} d_u;
+#ifdef CONFIG_FILEMON
+	struct filemon_info d_filemon[FILEMON_MAX];
+#endif
 };
 
 /*

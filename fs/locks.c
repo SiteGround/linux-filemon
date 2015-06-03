@@ -129,6 +129,7 @@
 #include <linux/hashtable.h>
 #include <linux/percpu.h>
 #include <linux/lglock.h>
+#include <linux/fsnotify.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/filelock.h>
@@ -1928,6 +1929,8 @@ SYSCALL_DEFINE2(flock, unsigned int, fd, unsigned int, cmd)
 	if (error)
 		goto out_free;
 
+	fsnotify_flock(f.file->f_path.dentry);
+
 	if (f.file->f_op->flock)
 		error = f.file->f_op->flock(f.file,
 					  (can_sleep) ? F_SETLKW : F_SETLK,
@@ -2078,6 +2081,8 @@ out:
  */
 int vfs_lock_file(struct file *filp, unsigned int cmd, struct file_lock *fl, struct file_lock *conf)
 {
+	fsnotify_plock(filp->f_path.dentry);
+
 	if (filp->f_op->lock)
 		return filp->f_op->lock(filp, cmd, fl);
 	else
