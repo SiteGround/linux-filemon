@@ -78,6 +78,7 @@ int filemon_version = 5;
 EXPORT_SYMBOL(filemon_version);
 
 static char str_scratch[PATH_MAX];
+static bool filemon_enabled;
 /*
  * Remember this dentry in the active dirty list and pin it via dget().
  * It remains there until you remove it by d_get_dirty()
@@ -605,7 +606,7 @@ void filemon_killall_dirty(struct super_block *sb)
 }
 EXPORT_SYMBOL(filemon_killall_dirty);
 
-static DEFINE_MUTEX(filemon_seq_mutex);
+static DEFINE_MUTEX(filemon_proc_mutex);
 
 
 struct filemon_seq_info {
@@ -698,7 +699,8 @@ static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
 
 static void filemon_seq_stop(struct seq_file *s, void *v)
 {
-	mutex_unlock(&filemon_seq_mutex);
+	filemon_enabled = false;
+	mutex_unlock(&filemon_proc_mutex);
 	if (v) {
 		pr_debug("[fmon]Freeing allocated info\n");
 		kfree(v);
@@ -726,6 +728,44 @@ static int filemon_seq_show(struct seq_file *s, void *v)
 }
 
 
+static ssize_t filemon_enabled_write(struct file *file, const char __user *buf,
+				     size_t count, loff_t *pos)
+{
+	char tmp[4];
+	unsigned long tmp_number;
+
+	if (count > sizeof(tmp))
+		count = sizeof(tmp);
+
+	if (copy_from_user(tmp, buf, count))
+	    return -EFAULT;
+
+	if (kstrtoul(strstrip(tmp), 0, &tmp_number))
+		return -EFAULT;
+
+	filemon_enabled = tmp_number ? true : false;
+
+	return count;
+}
+
+static int filemon_enabled_show(struct seq_file *m, void *v)
+{
+	return seq_printf(m, "%d\n", filemon_enabled);
+}
+
+static int filemon_enabled_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, filemon_enabled_show, NULL);
+}
+
+static const struct file_operations proc_filemon_enabled_ops = {
+	.open = filemon_enabled_open,
+	.read = seq_read,
+	.write = filemon_enabled_write,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 
 static const struct seq_operations filemon_seq_ops = {
 	.start = filemon_seq_start,
@@ -734,22 +774,28 @@ static const struct seq_operations filemon_seq_ops = {
 	.show = filemon_seq_show,
 };
 
-static int filemon_open(struct inode* inode, struct file *file)
+static int filemon_buffer_open(struct inode* inode, struct file *file)
 {
-	return seq_open(file, &filemon_seq_ops);
+	if (filemon_enabled)
+		return seq_open(file, &filemon_seq_ops);
+
+	return -EPERM;
 }
 
-
-static const struct file_operations proc_filemon_ops = {
-	.open = filemon_open,
+static const struct file_operations proc_filemon_buffer_ops = {
+	.open = filemon_buffer_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
 
+
 static int proc_filemon_init(void)
 {
-	proc_create("filemon", 0, NULL, &proc_filemon_ops);
+	struct proc_dir_entry *filemon_dir = proc_mkdir("filemon", NULL);
+
+	proc_create("buffer", 0, filemon_dir, &proc_filemon_buffer_ops);
+	proc_create("enabled", 0, filemon_dir, &proc_filemon_enabled_ops);
 	return 0;
 }
 late_initcall(proc_filemon_init);
