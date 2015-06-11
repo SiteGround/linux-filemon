@@ -52,6 +52,15 @@ struct qstr {
 	const unsigned char *name;
 };
 
+struct external_name {
+	union {
+		atomic_t count;
+		struct rcu_head head;
+	} u;
+	unsigned char name[];
+};
+
+
 #define QSTR_INIT(n,l) { { { .len = l } }, .name = n }
 #define hashlen_hash(hashlen) ((u32) (hashlen))
 #define hashlen_len(hashlen)  ((u32)((hashlen) >> 32))
@@ -274,6 +283,17 @@ extern int have_submounts(struct dentry *);
  * This adds the entry to the hash queues.
  */
 extern void d_rehash(struct dentry *);
+
+
+static inline struct external_name *external_name(struct dentry *dentry)
+{
+	return container_of(dentry->d_name.name, struct external_name, name[0]);
+}
+
+static inline int dname_external(const struct dentry *dentry)
+{
+	return dentry->d_name.name != dentry->d_iname;
+}
 
 /**
  * d_add - add dentry to hash queues

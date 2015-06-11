@@ -237,19 +237,6 @@ static inline int dentry_cmp(const struct dentry *dentry, const unsigned char *c
 	return dentry_string_cmp(cs, ct, tcount);
 }
 
-struct external_name {
-	union {
-		atomic_t count;
-		struct rcu_head head;
-	} u;
-	unsigned char name[];
-};
-
-static inline struct external_name *external_name(struct dentry *dentry)
-{
-	return container_of(dentry->d_name.name, struct external_name, name[0]);
-}
-
 static void __d_free(struct rcu_head *head)
 {
 	struct dentry *dentry = container_of(head, struct dentry, d_u.d_rcu);
@@ -276,10 +263,6 @@ static void __d_free_external(struct rcu_head *head)
 	kmem_cache_free(dentry_cache, dentry); 
 }
 
-static inline int dname_external(const struct dentry *dentry)
-{
-	return dentry->d_name.name != dentry->d_iname;
-}
 
 /*
  * Make sure other CPUs see the inode attached before the type is set.
