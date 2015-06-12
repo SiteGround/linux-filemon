@@ -71,8 +71,6 @@ enum filemon_type {
 #define FILEMON_FLOCK                   0x1000000
 #define FILEMON_PLOCK                   0x2000000
 
-#define FILEMON_MAX 2
-
 struct filemon_info {
         struct list_head fi_dirty;  /* membership in the corresponding dirty list */
 	struct timespec  fi_ctime;  /* timestamp of last dirtifying */
@@ -85,7 +83,7 @@ struct filemon_info {
 
 struct filemon_base {
         struct list_head fb_dirty;  /* head of dirty list */
-	int fb_dirty_count;         /* #entries in list */
+	unsigned long fb_dirty_count;         /* #entries in list */
 };
 
 #endif

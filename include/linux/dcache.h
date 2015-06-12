@@ -144,7 +144,7 @@ struct dentry {
 		struct rcu_head d_rcu;
 	} d_u;
 #ifdef CONFIG_FILEMON
-	struct filemon_info d_filemon[FILEMON_MAX];
+	struct filemon_info d_filemon;
 #endif
 };
 

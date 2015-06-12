@@ -242,14 +242,10 @@ static void __d_free(struct rcu_head *head)
 	struct dentry *dentry = container_of(head, struct dentry, d_u.d_rcu);
 
 #ifdef CONFIG_FILEMON
-	int i;
-
-	for (i = 0; i < 2; i++) {
-		struct filemon_info *info = &dentry->d_filemon[i];
-	        if (unlikely(!list_empty(&info->fi_dirty))) {
-			printk("filemon dentry %p not empty at %d\n", dentry, i);
-			return;
-		}
+	struct filemon_info *info = &dentry->d_filemon;
+	if (unlikely(!list_empty(&info->fi_dirty))) {
+		printk("filemon dentry %p not empty\n", dentry);
+		return;
 	}
 #endif
 
@@ -1572,15 +1568,12 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 
 #ifdef CONFIG_FILEMON
 	{
-		int i;
-		for(i = 0; i < FILEMON_MAX; i++) {
-			struct filemon_info *info = &dentry->d_filemon[i];
-			INIT_LIST_HEAD(&info->fi_dirty);
-			info->fi_fflags = 0;
+		struct filemon_info *info = &dentry->d_filemon;
+		INIT_LIST_HEAD(&info->fi_dirty);
+		info->fi_fflags = 0;
 #ifdef CONFIG_FILEMON_COUNTERS
-			memset(info->fi_counter, 0, sizeof(info->fi_counter));
+		memset(info->fi_counter, 0, sizeof(info->fi_counter));
 #endif
-		}
 	}
 #endif
 
