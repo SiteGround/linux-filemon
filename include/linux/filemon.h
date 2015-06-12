@@ -43,12 +43,8 @@
 
 extern struct semaphore filemon_mutex;   /* for atomicity of read() */
 extern spinlock_t filemon_dirty_lock;    /* to protect the lists */
-extern wait_queue_head_t filemon_wait;   /* event queue for waiting reader */
-extern struct filemon_base filemon_base[FILEMON_MAX]; /* dirty lists */
-extern int filemon_max_count;            /* max allowed pinnings */
+extern struct filemon_base filemon_dirty_list; /* dirty lists */
 extern unsigned int filemon_mask;        /* event mask */
-extern int filemon_active;               /* which one is active */
-extern int filemon_overflow;             /* overflow has occurred */
 
 extern void filemon_killall_dirty(struct super_block *sb);
 extern void __filemon_killall_dirty(struct super_block *sb);
@@ -56,31 +52,31 @@ extern void __filemon_killall_dirty(struct super_block *sb);
 extern void d_dirtify(struct dentry *dentry, int flag_bit);
 
 static inline
-bool __d_free_dirty(struct dentry * dentry, int active)
+bool __d_free_dirty(struct dentry * dentry)
 {
-	struct filemon_info *info = &dentry->d_filemon[active];
+	struct filemon_info *info = &dentry->d_filemon;
 	bool ok = !list_empty(&info->fi_dirty);
-	if(ok) {
+	if (ok) {
 		list_del_init(&info->fi_dirty);
-		filemon_base[active].fb_dirty_count--;
+		filemon_dirty_list.fb_dirty_count--;
 	}
 	return ok;
 }
 
 static inline
-bool __d_reenter_dirty(struct dentry * dentry, int active)
+bool __d_reenter_dirty(struct dentry * dentry)
 {
-	struct filemon_info *info = &dentry->d_filemon[active];
+	struct filemon_info *info = &dentry->d_filemon;
 	bool ok = !!list_empty(&info->fi_dirty);
-	if(ok) {
-		list_add(&info->fi_dirty, &filemon_base[active].fb_dirty);
-		filemon_base[active].fb_dirty_count++;
+	if (ok) {
+		list_add(&info->fi_dirty, &filemon_dirty_list.fb_dirty);
+		filemon_dirty_list.fb_dirty_count++;
 	}
 	return ok;
 }
 
 static inline
-bool d_reenter_dirty(struct dentry * dentry, struct filemon_info *copy, int active)
+bool d_reenter_dirty(struct dentry * dentry, struct filemon_info *copy)
 {
 #ifdef CONFIG_FILEMON_COUNTERS
 	int i;
@@ -88,12 +84,12 @@ bool d_reenter_dirty(struct dentry * dentry, struct filemon_info *copy, int acti
 	bool ok;
 
         spin_lock(&filemon_dirty_lock);
-	dentry->d_filemon[active].fi_fflags |= copy->fi_fflags;
+	dentry->d_filemon.fi_fflags |= copy->fi_fflags;
 #ifdef CONFIG_FILEMON_COUNTERS
 	for(i = 0; i < FM_MAX; i++)
-		dentry->d_filemon[active].fi_counter[i] += copy->fi_counter[i];
+		dentry->d_filemon.fi_counter[i] += copy->fi_counter[i];
 #endif
-	ok = __d_reenter_dirty(dentry, active);
+	ok = __d_reenter_dirty(dentry);
         spin_unlock(&filemon_dirty_lock);
 	return ok;
 }
@@ -105,23 +101,24 @@ bool d_reenter_dirty(struct dentry * dentry, struct filemon_info *copy, int acti
  * This must not be called from interrupt context.
  */
 static inline
-struct dentry *d_get_dirty(int active, struct filemon_info *copy)
+struct dentry *d_get_dirty(struct filemon_info *copy)
 {
 	struct dentry * dentry;
 	struct filemon_info *info;
 
         spin_lock(&filemon_dirty_lock);
 
-	if(list_empty(&filemon_base[active].fb_dirty)) {
+	if(list_empty(&filemon_dirty_list.fb_dirty)) {
 		spin_unlock(&filemon_dirty_lock);
 		return NULL;
 	}
 
-	dentry = list_first_entry(&filemon_base[active].fb_dirty, struct dentry, d_filemon[active].fi_dirty);
+	dentry = list_first_entry(&filemon_dirty_list.fb_dirty, struct dentry,
+				  d_filemon.fi_dirty);
 
-	__d_free_dirty(dentry, active);
+	__d_free_dirty(dentry);
 
-	info = &dentry->d_filemon[active];
+	info = &dentry->d_filemon;
 	memcpy(copy, info, sizeof(struct filemon_info));
 	info->fi_fflags = 0;
 #ifdef CONFIG_FILEMON_COUNTERS
@@ -135,8 +132,8 @@ struct dentry *d_get_dirty(int active, struct filemon_info *copy)
 
 #else
 #define d_dirtify(dentry,flags)         /*empty*/
-#define d_get_dirty(active)             NULL
-#define d_free_dirty(dentry, active)      /*empty*/
+#define d_get_dirty(copy)             NULL
+#define d_free_dirty(dentry)      /*empty*/
 #define filemon_killall_dirty(sb) /*empty*/
 #endif
 
