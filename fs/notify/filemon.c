@@ -78,7 +78,8 @@ int filemon_version = 5;
 EXPORT_SYMBOL(filemon_version);
 
 static char str_scratch[PATH_MAX];
-static bool filemon_enabled;
+static bool filemon_enabled = false;
+static unsigned long filemon_listlimit = 0;
 /*
  * Remember this dentry in the active dirty list and pin it via dget().
  * It remains there until you remove it by d_get_dirty()
@@ -609,7 +610,7 @@ EXPORT_SYMBOL(filemon_killall_dirty);
 static DEFINE_MUTEX(filemon_proc_mutex);
 
 
-struct filemon_seq_info {
+struct filemon_iter_state {
 	struct dentry *dentry;
 	struct filemon_info metadata;
 	loff_t pos;
@@ -620,10 +621,8 @@ static void *filemon_seq_start(struct seq_file *s, loff_t *pos)
 	struct filemon_iter_state *iter = s->private;
 
 	pr_debug("=================[filemon_seq_start]==================\n");
-
 	/* This is released from filemon_seq_stop */
 	mutex_lock(&filemon_proc_mutex);
-
 	if (filemon_listlimit && *pos >= filemon_listlimit - 1)
 		return NULL;
 
@@ -637,26 +636,19 @@ static void *filemon_seq_start(struct seq_file *s, loff_t *pos)
 			pr_debug("[filemon] Overflow ocurred. Killed all nodes\n");
 			__filemon_killall_dirty(NULL);
 			filemon_overflow = 0;
+			spin_unlock(&filemon_dirty_lock);
 			return NULL;
 		} else
 			spin_unlock(&filemon_dirty_lock);
 	}
 
-	/* Begin actual stuff */
-	info = kmalloc(sizeof(*info), GFP_KERNEL | GFP_NOFS);
-	if (!info)
-		return ERR_PTR(-ENOMEM);
-
 	/* For now we are always using filemon_active (should be 0) */
-	info->dentry = d_get_dirty(filemon_active, &info->metadata);
-	info->pos = *pos;
-	if (!info->dentry) {
-		pr_debug("Freeing in seq_start\n");
-		kfree(info);
+	iter->dentry = d_get_dirty(filemon_active, &iter->metadata);
+	iter->pos = *pos;
+	if (!iter->dentry)
 		return NULL;
-	}
 
-	return info;
+	return iter;
 }
 
 
@@ -666,15 +658,14 @@ static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
 	/* When we are here we need to free the current entry and then 
 	 * get another one
 	 */
-	struct filemon_seq_info *info = v;
+	struct filemon_iter_state *iter = v;
 	pr_debug("[filemon_seq_next]\n");
 
 	/* Handle the case where we have copied a very 
 	 * long file name
 	 */
-	if (dname_external(info->dentry) && (info->metadata.fi_fflags & FILEMON_MOVED_FROM)) {
-		char *path = dentry_path_raw(info->dentry, str_scratch, PATH_MAX);
-		struct external_name *old_name = external_name(info->dentry);
+	if (dname_external(iter->dentry) && (iter->metadata.fi_fflags & FILEMON_MOVED_FROM)) {
+		struct external_name *old_name = external_name(iter->dentry);
 
 		if (old_name && (atomic_dec_and_test(&old_name->u.count)))
 			kfree_rcu(old_name, u.head);
@@ -683,36 +674,35 @@ static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
 	/* Put the extra ref that we have taken when this
 	 * dentry was put into the dirty list
 	 */
-	dput(info->dentry);
+	dput(iter->dentry);
 
-	info->dentry = d_get_dirty(filemon_active, &info->metadata);
-	*pos += 1;
-	info->pos = *pos;
-	if (!info->dentry) {
-		pr_debug("freeing allocated in seq_next\n");
-		kfree(v);
+	if (filemon_listlimit && iter->pos >= filemon_listlimit - 1) {
+		pr_debug("%s: listlimit reached. idx = %d\n", __func__, iter->pos);
 		return NULL;
 	}
 
-	return info;
+	iter->dentry = d_get_dirty(filemon_active, &iter->metadata);
+	*pos += 1;
+	iter->pos = *pos;
+
+
+	if (!iter->dentry)
+		return NULL;
+
+	return iter;
 }
 
 static void filemon_seq_stop(struct seq_file *s, void *v)
 {
 	filemon_enabled = false;
 	mutex_unlock(&filemon_proc_mutex);
-	if (v) {
-		pr_debug("[fmon]Freeing allocated info\n");
-		kfree(v);
-	}
-
 	pr_debug("==================[filemon_seq_stop]====================\n");
 }
 
 static int filemon_seq_show(struct seq_file *s, void *v)
 {
-	struct filemon_seq_info *info = v;
-	char *path = dentry_path_raw(info->dentry, str_scratch, PATH_MAX);
+	struct filemon_iter_state *iter= v;
+	char *path = dentry_path_raw(iter->dentry, str_scratch, PATH_MAX);
 	pr_debug("filemon_seq_show\n");
 	if (path < 0)
 		return -EFAULT;
@@ -728,6 +718,7 @@ static int filemon_seq_show(struct seq_file *s, void *v)
 }
 
 
+
 static ssize_t filemon_enabled_write(struct file *file, const char __user *buf,
 				     size_t count, loff_t *pos)
 {
@@ -738,25 +729,68 @@ static ssize_t filemon_enabled_write(struct file *file, const char __user *buf,
 		count = sizeof(tmp);
 
 	if (copy_from_user(tmp, buf, count))
-	    return -EFAULT;
+		return -EFAULT;
 
 	if (kstrtoul(strstrip(tmp), 0, &tmp_number))
-		return -EFAULT;
+		return -EINVAL;
 
 	filemon_enabled = tmp_number ? true : false;
 
 	return count;
 }
 
-static int filemon_enabled_show(struct seq_file *m, void *v)
+static inline int filemon_enabled_show(struct seq_file *m, void *v)
 {
 	return seq_printf(m, "%d\n", filemon_enabled);
 }
 
-static int filemon_enabled_open(struct inode *inode, struct file *file)
+static inline int filemon_enabled_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, filemon_enabled_show, NULL);
 }
+
+static ssize_t filemon_listlimit_write(struct file *file, const char __user *buf,
+				     size_t count, loff_t *pos)
+{
+	char tmp[4];
+	unsigned long tmp_number;
+
+	mutex_lock(&filemon_proc_mutex);
+	if (count > sizeof(tmp))
+		count = sizeof(tmp);
+
+	if (copy_from_user(tmp, buf, count)) {
+		count = -EFAULT;
+		goto out;
+	}
+
+	if (kstrtoul(strstrip(tmp), 0, &tmp_number)) {
+		count = -EINVAL;
+		goto out;
+	}
+
+	filemon_listlimit = tmp_number;
+
+out:
+	mutex_unlock(&filemon_proc_mutex);
+	return count;
+}
+
+static inline int filemon_listlimit_show(struct seq_file *m, void *v)
+{
+	int ret;
+	mutex_lock(&filemon_proc_mutex);
+	ret = seq_printf(m, "%lu\n", filemon_listlimit);
+	mutex_unlock(&filemon_proc_mutex);
+
+	return ret;
+}
+
+static inline int filemon_listlimit_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, filemon_listlimit_show, NULL);
+}
+
 
 static const struct file_operations proc_filemon_enabled_ops = {
 	.open = filemon_enabled_open,
@@ -766,6 +800,13 @@ static const struct file_operations proc_filemon_enabled_ops = {
 	.release = single_release,
 };
 
+static const struct file_operations proc_filemon_listlimit_ops = {
+	.open = filemon_listlimit_open,
+	.read = seq_read,
+	.write = filemon_listlimit_write,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
 
 static const struct seq_operations filemon_seq_ops = {
 	.start = filemon_seq_start,
@@ -777,7 +818,8 @@ static const struct seq_operations filemon_seq_ops = {
 static int filemon_buffer_open(struct inode* inode, struct file *file)
 {
 	if (filemon_enabled)
-		return seq_open(file, &filemon_seq_ops);
+		return seq_open_private(file, &filemon_seq_ops,
+					sizeof(struct filemon_iter_state));
 
 	return -EPERM;
 }
@@ -786,7 +828,7 @@ static const struct file_operations proc_filemon_buffer_ops = {
 	.open = filemon_buffer_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
-	.release = seq_release,
+	.release = seq_release_private,
 };
 
 
@@ -796,6 +838,8 @@ static int proc_filemon_init(void)
 
 	proc_create("buffer", 0, filemon_dir, &proc_filemon_buffer_ops);
 	proc_create("enabled", 0, filemon_dir, &proc_filemon_enabled_ops);
+	proc_create("listing_limit", 0, filemon_dir,
+		    &proc_filemon_listlimit_ops);
 	return 0;
 }
 late_initcall(proc_filemon_init);
