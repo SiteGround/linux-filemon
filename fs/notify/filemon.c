@@ -55,7 +55,6 @@ void d_dirtify(struct dentry *dentry, int flag_bit)
 {
 	struct dentry *unpin = dentry;
 	struct filemon_info *info;
-
 	if (flag_bit < 0 || flag_bit >= FM_MAX)
 		BUG();
 
@@ -82,10 +81,22 @@ void d_dirtify(struct dentry *dentry, int flag_bit)
 	info->fi_counter[flag_bit]++;
 #endif
 
+	// It is possible that an already dirtied dentry is
+	// dirtied again, in this case what do is just re-enter it
+	// into the list and drop the extra reference we've taken in
+	// this function. If the entry is being dirtied for the first time
+	// then do the correct accounting and make sure we don't drop the
+	// reference.
 	spin_lock(&filemon_dirty_lock);
-	list_del(&info->fi_dirty);
+	if (list_empty(&info->fi_dirty)) {
+		filemon_dirty_list.fb_dirty_count++;
+		unpin = NULL;
+	} else
+		list_del(&info->fi_dirty);
+
 	list_add_tail(&info->fi_dirty, &filemon_dirty_list.fb_dirty);
-        spin_unlock(&filemon_dirty_lock);
+	spin_unlock(&filemon_dirty_lock);
+
 unpin:
 	if (unpin)
 		dput(dentry);
@@ -120,8 +131,8 @@ void __filemon_killall_dirty(struct super_block *sb)
 	struct dentry *dentry;
 	struct list_head remember = LIST_HEAD_INIT(remember);
 	while(!list_empty(&filemon_dirty_list.fb_dirty)) {
-		tmp = filemon_dirty_list.fb_dirty.next;
-		dentry = list_entry(tmp, struct dentry, d_filemon.fi_dirty);
+		dentry = list_first_entry(&filemon_dirty_list.fb_dirty,
+					  struct dentry, d_filemon.fi_dirty);
 		if (!sb || dentry->d_sb == sb) {
 		        __d_free_dirty(dentry);
 			spin_unlock(&filemon_dirty_lock);
