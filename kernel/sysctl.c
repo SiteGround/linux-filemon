@@ -223,9 +223,6 @@ extern struct ctl_table random_table[];
 #ifdef CONFIG_EPOLL
 extern struct ctl_table epoll_table[];
 #endif
-#ifdef CONFIG_FILEMON
-extern struct ctl_table filemon_table[];
-#endif
 
 #ifdef HAVE_ARCH_PICK_MMAP_LAYOUT
 int sysctl_legacy_va_layout;
@@ -1652,13 +1649,6 @@ static struct ctl_table fs_table[] = {
 		.procname	= "inotify",
 		.mode		= 0555,
 		.child		= inotify_table,
-	},
-#endif	
-#ifdef CONFIG_FILEMON
-	{
-		.procname	= "filemon",
-		.mode		= 0555,
-		.child		= filemon_table,
 	},
 #endif
 #ifdef CONFIG_EPOLL
