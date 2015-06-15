@@ -44,7 +44,6 @@
 extern struct semaphore filemon_mutex;   /* for atomicity of read() */
 extern spinlock_t filemon_dirty_lock;    /* to protect the lists */
 extern struct filemon_base filemon_dirty_list; /* dirty lists */
-extern unsigned int filemon_mask;        /* event mask */
 
 extern void filemon_killall_dirty(struct super_block *sb);
 extern void __filemon_killall_dirty(struct super_block *sb);
@@ -95,7 +94,7 @@ bool d_reenter_dirty(struct dentry * dentry, struct filemon_info *copy)
 }
 
 /*
- * Get the LRU-eldest dentry from one of the global dirty lists.
+ * Get the LRU-eldest dentry
  * The caller must either dput() it later, or reenter it
  * via d_reenter_dirty().
  * This must not be called from interrupt context.

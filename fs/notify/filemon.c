@@ -24,7 +24,6 @@
 
 #include <linux/spinlock.h>
 #include <asm/uaccess.h>
-#include <linux/sysctl.h>
 #include <linux/slab.h>
 #include <linux/filemon.h>
 #include <linux/seq_file.h>
@@ -41,7 +40,9 @@ DEFINE_SPINLOCK(filemon_dirty_lock);
 struct filemon_base filemon_dirty_list = {
 	LIST_HEAD_INIT(filemon_dirty_list.fb_dirty), 0
 };
-unsigned int filemon_mask = FILEMON_OPEN | FILEMON_CLOSE | FILEMON_READ | FILEMON_STAT | FILEMON_READDIR | FILEMON_FLOCK | FILEMON_PLOCK;
+
+//this is eclusion mask. 
+unsigned int filemon_exclusion_mask = FILEMON_OPEN | FILEMON_CLOSE | FILEMON_READ | FILEMON_STAT | FILEMON_READDIR | FILEMON_FLOCK | FILEMON_PLOCK;
 
 static char str_scratch[PATH_MAX];
 static bool filemon_enabled = false;
@@ -58,7 +59,7 @@ void d_dirtify(struct dentry *dentry, int flag_bit)
 	if (flag_bit < 0 || flag_bit >= FM_MAX)
 		BUG();
 
-	if ((1u << flag_bit) & filemon_mask)
+	if ((1u << flag_bit) & filemon_exclusion_mask)
 		return;
 
 	dget(dentry);
@@ -102,17 +103,6 @@ unpin:
 		dput(dentry);
 }
 EXPORT_SYMBOL(d_dirtify);
-
-struct ctl_table filemon_table[] = {
-	{
-		.procname	= "mask",
-		.data		= &filemon_mask,
-		.maxlen		= sizeof(filemon_mask),
-		.mode		= 0600,
-		.proc_handler	= &proc_dointvec_minmax,
-	},
-	{}
-};
 
 /* Free all dentries from the given superblock.
  * If sb==NULL, globally free all (used on overflow).
@@ -251,7 +241,6 @@ static int filemon_seq_show(struct seq_file *s, void *v)
 }
 
 
-
 static ssize_t filemon_enabled_write(struct file *file, const char __user *buf,
 				     size_t count, loff_t *pos)
 {
@@ -339,6 +328,38 @@ static inline int filemon_dirtycount_open(struct inode *inode, struct file *file
 	return single_open(file, filemon_dirtycount_show, NULL);
 }
 
+static ssize_t filemon_mask_write(struct file *file, const char __user *buf,
+				     size_t count, loff_t *pos)
+{
+	char tmp[4];
+	unsigned long tmp_number;
+
+	if (count > sizeof(tmp))
+		count = sizeof(tmp);
+
+	if (copy_from_user(tmp, buf, count))
+		return -EFAULT;
+
+	if (kstrtoul(strstrip(tmp), 0, &tmp_number))
+		return -EINVAL;
+
+	filemon_exclusion_mask = tmp_number;
+
+	return count;
+}
+
+static inline int filemon_mask_show(struct seq_file *m, void *v)
+{
+	return seq_printf(m, "%x\n", filemon_exclusion_mask);
+}
+
+static inline int filemon_mask_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, filemon_mask_show, NULL);
+}
+
+
+
 static const struct file_operations proc_filemon_dirtycount_ops = {
 	.open = filemon_dirtycount_open,
 	.read = seq_read,
@@ -350,6 +371,14 @@ static const struct file_operations proc_filemon_enabled_ops = {
 	.open = filemon_enabled_open,
 	.read = seq_read,
 	.write = filemon_enabled_write,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+static const struct file_operations proc_filemon_mask_ops = {
+	.open = filemon_mask_open,
+	.read = seq_read,
+	.write = filemon_mask_write,
 	.llseek = seq_lseek,
 	.release = single_release,
 };
@@ -391,6 +420,7 @@ static int proc_filemon_init(void)
 	struct proc_dir_entry *filemon_dir = proc_mkdir("filemon", NULL);
 
 	proc_create("buffer", 0, filemon_dir, &proc_filemon_buffer_ops);
+	proc_create("excluded_events", 0, filemon_dir, &proc_filemon_mask_ops);
 	proc_create("dirty_count", 0, filemon_dir, &proc_filemon_dirtycount_ops);
 	proc_create("enabled", 0, filemon_dir, &proc_filemon_enabled_ops);
 	proc_create("listing_limit", 0, filemon_dir,
