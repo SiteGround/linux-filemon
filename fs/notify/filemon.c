@@ -30,15 +30,25 @@
 #include <linux/init.h>
 #include <linux/proc_fs.h>
 #include <linux/sched.h>
+#include <linux/string.h>
+#include <linux/fs.h>
+#include <linux/rculist.h>
 
-#include "../internal.h"
-#include "../mount.h"
-
+/* Protects all proc interactions */
 static DEFINE_MUTEX(filemon_proc_mutex);
+/* Protects filemon_dirty_list */
 DEFINE_SPINLOCK(filemon_dirty_lock);
 
 struct filemon_base filemon_dirty_list = {
 	LIST_HEAD_INIT(filemon_dirty_list.fb_dirty), 0
+};
+
+/* This lock protects only the write-side critical section */
+static DEFINE_SPINLOCK(filemon_dir_lock);
+static LIST_HEAD(filemon_dir_list);
+struct filemon_dir_entry {
+	struct file *file;
+	struct list_head entry;
 };
 
 //this is eclusion mask. 
@@ -47,6 +57,31 @@ unsigned int filemon_exclusion_mask = FILEMON_OPEN | FILEMON_CLOSE | FILEMON_REA
 static char str_scratch[PATH_MAX];
 static bool filemon_enabled = false;
 static unsigned long filemon_listlimit = 0;
+
+
+static bool should_log(struct dentry *target, int flag_bit)
+{
+	struct filemon_dir_entry *member;
+	bool ret = false;
+	bool rename_lock_held = (flag_bit == FM_MOVED_FROM)
+				|| (flag_bit == FM_MOVED_TO);
+	rcu_read_lock();
+	if (list_empty(&filemon_dir_list))
+		ret = true;
+
+	list_for_each_entry_rcu(member, &filemon_dir_list, entry) {
+		if (rename_lock_held)
+			ret = d_ancestor(member->file->f_path.dentry, target) != NULL;
+		else
+			ret = is_subdir(target, member->file->f_path.dentry);
+
+		if (ret)
+			break;
+	}
+	rcu_read_unlock();
+
+	return ret;
+}
 /*
  * Remember this dentry in the active dirty list and pin it via dget().
  * It remains there until you remove it by d_get_dirty()
@@ -63,6 +98,10 @@ void d_dirtify(struct dentry *dentry, int flag_bit)
 		return;
 
 	dget(dentry);
+
+	if (!should_log(dentry, flag_bit))
+		goto unpin;
+
 	// don't dirtify on inactive / currently umounting filesystems
         if (!(dentry->d_sb->s_flags & MS_ACTIVE))
 		goto unpin;
@@ -358,7 +397,101 @@ static inline int filemon_mask_open(struct inode *inode, struct file *file)
 	return single_open(file, filemon_mask_show, NULL);
 }
 
+static ssize_t filemon_filter_write(struct file *file, const char __user *buf,
+				    size_t count, loff_t *pos)
+{
+	char *tmp, *new_line;
+	struct filemon_dir_entry *dir;
+	ssize_t ret = -EFAULT;
 
+	mutex_lock(&filemon_proc_mutex);
+	if (count >= PAGE_SIZE)
+		count = PAGE_SIZE - 1;
+
+	if (*pos != 0) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	tmp = (char*)__get_free_page(GFP_TEMPORARY);
+	if (!tmp) {
+		ret = -ENOMEM;
+		goto unlock;
+	}
+
+	dir = kzalloc(sizeof(*dir), GFP_KERNEL);
+	if (!dir) {
+		ret = -ENOMEM;
+		goto out_free_page;
+	}
+
+	if (copy_from_user(tmp, buf, count)) {
+		ret = -EFAULT;
+		goto out_free_mem;
+	}
+
+	new_line = memchr(tmp, '\n', count);
+	if (new_line)
+		tmp[(new_line - tmp)] = '\0';
+	else
+		tmp[count] = '\0';
+
+
+	dir->file = filp_open(tmp, O_DIRECTORY, 0655);
+	if (IS_ERR(dir->file)) {
+		ret = PTR_ERR(dir->file);
+		goto out_free_mem;
+	}
+
+	spin_lock(&filemon_dir_lock);
+	list_add_tail_rcu(&dir->entry, &filemon_dir_list);
+	spin_unlock(&filemon_dir_lock);
+
+	free_page((unsigned long) tmp);
+
+	mutex_unlock(&filemon_proc_mutex);
+
+	return count;
+
+out_free_mem:
+	kfree(dir);
+out_free_page:
+	free_page((unsigned long) tmp);
+unlock:
+	mutex_unlock(&filemon_proc_mutex);
+	return ret;
+}
+
+static inline int filemon_filter_show(struct seq_file *m, void *v)
+{
+	uint32_t i = 0;
+	struct filemon_dir_entry *entry;
+
+	mutex_lock(&filemon_proc_mutex);
+	rcu_read_lock();
+	list_for_each_entry_rcu(entry, &filemon_dir_list, entry) {
+		char *path = dentry_path_raw(entry->file->f_path.dentry, str_scratch, PATH_MAX);
+		seq_printf(m, "[%u]: %s\n", i, path);
+		++i;
+
+	}
+	rcu_read_unlock();
+	mutex_unlock(&filemon_proc_mutex);
+	return 0;
+}
+
+static inline int filemon_filter_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, filemon_filter_show, NULL);
+}
+
+static const struct file_operations proc_filemon_filter_ops = {
+	.open = filemon_filter_open,
+	.write = filemon_filter_write,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
 
 static const struct file_operations proc_filemon_dirtycount_ops = {
 	.open = filemon_dirtycount_open,
@@ -407,6 +540,7 @@ static int filemon_buffer_open(struct inode* inode, struct file *file)
 	return -EACCES;
 }
 
+
 static const struct file_operations proc_filemon_buffer_ops = {
 	.open = filemon_buffer_open,
 	.read = seq_read,
@@ -420,6 +554,7 @@ static int proc_filemon_init(void)
 	struct proc_dir_entry *filemon_dir = proc_mkdir("filemon", NULL);
 
 	proc_create("buffer", 0, filemon_dir, &proc_filemon_buffer_ops);
+	proc_create("path_filter", 0, filemon_dir, &proc_filemon_filter_ops);
 	proc_create("excluded_events", 0, filemon_dir, &proc_filemon_mask_ops);
 	proc_create("dirty_count", 0, filemon_dir, &proc_filemon_dirtycount_ops);
 	proc_create("enabled", 0, filemon_dir, &proc_filemon_enabled_ops);
