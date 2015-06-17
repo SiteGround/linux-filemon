@@ -650,7 +650,7 @@ static void *filemon_seq_start(struct seq_file *s, loff_t *pos)
 	info->dentry = d_get_dirty(filemon_active, &info->metadata);
 	info->pos = *pos;
 	if (!info->dentry) {
-		pr_info("Freeing in seq_start\n");
+		pr_debug("Freeing in seq_start\n");
 		kfree(info);
 		return NULL;
 	}
@@ -666,8 +666,19 @@ static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
 	 * get another one
 	 */
 	struct filemon_seq_info *info = v;
+	pr_debug("[filemon_seq_next]\n");
 
-	pr_info("[filemon_seq_next]\n");
+	/* Handle the case where we have copied a very 
+	 * long file name
+	 */
+	if (dname_external(info->dentry) && (info->metadata.fi_fflags & FILEMON_MOVED_FROM)) {
+		char *path = dentry_path_raw(info->dentry, str_scratch, PATH_MAX);
+		struct external_name *old_name = external_name(info->dentry);
+
+		if (old_name && (atomic_dec_and_test(&old_name->u.count)))
+			kfree_rcu(old_name, u.head);
+	}
+
 	/* Put the extra ref that we have taken when this
 	 * dentry was put into the dirty list
 	 */
@@ -677,7 +688,7 @@ static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
 	*pos += 1;
 	info->pos = *pos;
 	if (!info->dentry) {
-		pr_info("freeing allocated in seq_next\n");
+		pr_debug("freeing allocated in seq_next\n");
 		kfree(v);
 		return NULL;
 	}
@@ -689,18 +700,18 @@ static void filemon_seq_stop(struct seq_file *s, void *v)
 {
 	mutex_unlock(&filemon_seq_mutex);
 	if (v) {
-		pr_info("[fmon]Freeing allocated info\n");
+		pr_debug("[fmon]Freeing allocated info\n");
 		kfree(v);
 	}
 
-	pr_info("==================[filemon_seq_stop]====================\n");
+	pr_debug("==================[filemon_seq_stop]====================\n");
 }
 
 static int filemon_seq_show(struct seq_file *s, void *v)
 {
 	struct filemon_seq_info *info = v;
 	char *path = dentry_path_raw(info->dentry, str_scratch, PATH_MAX);
-	pr_info("filemon_seq_show\n");
+	pr_debug("filemon_seq_show\n");
 	if (path < 0)
 		return -EFAULT;
 

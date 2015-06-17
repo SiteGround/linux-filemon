@@ -2450,6 +2450,7 @@ static void swap_names(struct dentry *dentry, struct dentry *target)
 {
 	if (unlikely(dname_external(target))) {
 		if (unlikely(dname_external(dentry))) {
+
 			/*
 			 * Both external: swap the pointers
 			 */
@@ -2494,19 +2495,70 @@ static void swap_names(struct dentry *dentry, struct dentry *target)
 static void copy_name(struct dentry *dentry, struct dentry *target)
 {
 	struct external_name *old_name = NULL;
+#ifdef CONFIG_FILEMON
+	char tmp[DNAME_INLINE_LEN];
+	size_t tmplen;
+#endif
 	if (unlikely(dname_external(dentry)))
 		old_name = external_name(dentry);
 	if (unlikely(dname_external(target))) {
-		atomic_inc(&external_name(target)->u.count);
+#ifdef CONFIG_FILEMON
+		if (old_name) {
+			/* dentry: external, target: external */
+			tmplen = dentry->d_name.len;
+		} else {
+			/* dentry: internal: target: external */
+			tmplen = dentry->d_name.len + 1;
+			memcpy(tmp, dentry->d_iname, tmplen);
+		}
+#endif
+		/* We transfer the reference to dentry, so
+		 * we do not have to increment it here
+		 */
 		dentry->d_name = target->d_name;
+#ifdef CONFIG_FILEMON
+		if (old_name) {
+			/* dentry: external, target: external */
+			target->d_name.name = old_name->name;
+			target->d_name.len = tmplen;
+		} else {
+			/* dentry: internal: target: external */
+			memcpy(target->d_iname, tmp, tmplen);
+			target->d_name.len = tmplen;
+			target->d_name.name = target->d_iname;
+		}
+#endif
 	} else {
+#ifdef CONFIG_FILEMON
+		if (!old_name) {
+			/* dentry: internal, target: internal */
+			tmplen = dentry->d_name.len + 1;
+			memcpy(tmp, dentry->d_iname, tmplen);
+		} else {
+			/* dentry: external, target : internal */
+			tmplen = dentry->d_name.len;
+		}
+#endif
 		memcpy(dentry->d_iname, target->d_name.name,
 				target->d_name.len + 1);
 		dentry->d_name.name = dentry->d_iname;
 		dentry->d_name.hash_len = target->d_name.hash_len;
+#ifdef CONFIG_FILEMON
+		if (!old_name) {
+			memcpy(target->d_iname, tmp, tmplen);
+			target->d_name.len = tmplen;
+			target->d_name.name = target->d_iname;
+		} else {
+			target->d_name.name = old_name->name;
+			target->d_name.len = tmplen;
+		}
+#endif
 	}
-	if (old_name && likely(atomic_dec_and_test(&old_name->u.count)))
-		kfree_rcu(old_name, u.head);
+
+#ifndef CONFIG_FILEMON
+       if (old_name && likely(atomic_dec_and_test(&old_name->u.count)))
+               kfree_rcu(old_name, u.head);
+#endif
 }
 
 static void dentry_lock_for_move(struct dentry *dentry, struct dentry *target)
