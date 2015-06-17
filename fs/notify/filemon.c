@@ -105,14 +105,6 @@ EXPORT_SYMBOL(d_dirtify);
 
 struct ctl_table filemon_table[] = {
 	{
-	{
-		.procname	= "dirty_count",
-		.data		= &filemon_dirty_list.fb_dirty_count,
-		.maxlen		= sizeof(int),
-		.mode		= 0400,
-		.proc_handler	= &proc_dointvec_minmax,
-	},
-	{
 		.procname	= "mask",
 		.data		= &filemon_mask,
 		.maxlen		= sizeof(filemon_mask),
@@ -332,6 +324,27 @@ static inline int filemon_listlimit_open(struct inode *inode, struct file *file)
 	return single_open(file, filemon_listlimit_show, NULL);
 }
 
+static inline int filemon_dirtycount_show(struct seq_file *m, void *v)
+{
+	int ret;
+	mutex_lock(&filemon_proc_mutex);
+	ret = seq_printf(m, "%lu\n", filemon_dirty_list.fb_dirty_count);
+	mutex_unlock(&filemon_proc_mutex);
+
+	return ret;
+}
+
+static inline int filemon_dirtycount_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, filemon_dirtycount_show, NULL);
+}
+
+static const struct file_operations proc_filemon_dirtycount_ops = {
+	.open = filemon_dirtycount_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
 
 static const struct file_operations proc_filemon_enabled_ops = {
 	.open = filemon_enabled_open,
@@ -378,6 +391,7 @@ static int proc_filemon_init(void)
 	struct proc_dir_entry *filemon_dir = proc_mkdir("filemon", NULL);
 
 	proc_create("buffer", 0, filemon_dir, &proc_filemon_buffer_ops);
+	proc_create("dirty_count", 0, filemon_dir, &proc_filemon_dirtycount_ops);
 	proc_create("enabled", 0, filemon_dir, &proc_filemon_enabled_ops);
 	proc_create("listing_limit", 0, filemon_dir,
 		    &proc_filemon_listlimit_ops);
