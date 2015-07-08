@@ -33,6 +33,7 @@
 #include <linux/string.h>
 #include <linux/fs.h>
 #include <linux/rculist.h>
+#include <linux/mount.h>
 
 /* Protects all proc interactions */
 static DEFINE_MUTEX(filemon_proc_mutex);
@@ -261,22 +262,37 @@ static void filemon_seq_stop(struct seq_file *s, void *v)
 	pr_debug("==================[filemon_seq_stop]====================\n");
 }
 
+
+extern void path_for_dentry(struct dentry *dentry, struct path *path);
+
 static int filemon_seq_show(struct seq_file *s, void *v)
 {
 	struct filemon_iter_state *iter= v;
-	char *path = dentry_path_raw(iter->dentry, str_scratch, PATH_MAX);
+	struct path path;
+	char *path_buf;
+	int ret = -EFAULT;
+
+	path_for_dentry(iter->dentry, &path);
+
+	BUG_ON(path.dentry != iter->dentry);
+
+	path_buf = d_absolute_path(&path, str_scratch, PATH_MAX);
 	pr_debug("filemon_seq_show\n");
-	if (path < 0)
-		return -EFAULT;
+	if (IS_ERR(path_buf))
+		goto out;
 
 	seq_printf(s, "[%lld] %-2ld.%09ld %08x %-12s\n",
-                iter->pos,
-                (unsigned long)iter->metadata.fi_ctime.tv_sec,
-                iter->metadata.fi_ctime.tv_nsec,
-                iter->metadata.fi_fflags,
-                path);
+	        iter->pos,
+	        (unsigned long)iter->metadata.fi_ctime.tv_sec,
+	        iter->metadata.fi_ctime.tv_nsec,
+	        iter->metadata.fi_fflags,
+	        path_buf);
+	ret = 0;
 
-	return 0;
+out:
+	path_put(&path);
+
+	return ret;
 }
 
 
