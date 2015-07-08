@@ -715,6 +715,25 @@ out:
 	return is_covered;
 }
 
+/* Used only for fmon */
+void path_for_dentry(struct dentry *dentry, struct path *path)
+{
+	struct mnt_namespace *ns = current->nsproxy->mnt_ns;
+	struct mount *mnt;
+
+	dget(dentry);
+
+	down_read(&namespace_sem);
+	list_for_each_entry(mnt, &ns->list, mnt_list) {
+		if (mnt->mnt.mnt_root->d_sb == dentry->d_sb) {
+			path->dentry = dentry;
+			path->mnt = mntget(&mnt->mnt);
+			break;
+		}
+	}
+	up_read(&namespace_sem);
+}
+
 static struct mountpoint *lookup_mountpoint(struct dentry *dentry)
 {
 	struct hlist_head *chain = mp_hash(dentry);
