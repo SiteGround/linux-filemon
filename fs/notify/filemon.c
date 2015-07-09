@@ -35,7 +35,7 @@
 #include <linux/rculist.h>
 #include <linux/mount.h>
 
-/* Protects all proc interactions */
+/* Protects all procfs interactions */
 static DEFINE_MUTEX(filemon_proc_mutex);
 /* Protects filemon_dirty_list */
 DEFINE_SPINLOCK(filemon_dirty_lock);
@@ -55,6 +55,7 @@ struct filemon_dir_entry {
 //this is eclusion mask. 
 unsigned int filemon_exclusion_mask = FILEMON_OPEN | FILEMON_CLOSE | FILEMON_READ | FILEMON_STAT | FILEMON_READDIR | FILEMON_FLOCK | FILEMON_PLOCK;
 
+/* Access to this scratch space is also protected by filemon_proc_mutex */
 static char str_scratch[PATH_MAX];
 static bool filemon_enabled = false;
 static unsigned long filemon_listlimit = 0;
@@ -486,7 +487,7 @@ static inline int filemon_filter_show(struct seq_file *m, void *v)
 	mutex_lock(&filemon_proc_mutex);
 	rcu_read_lock();
 	list_for_each_entry_rcu(entry, &filemon_dir_list, entry) {
-		char *path = dentry_path_raw(entry->file->f_path.dentry, str_scratch, PATH_MAX);
+		char *path = d_absolute_path(&entry->file->f_path, str_scratch, PATH_MAX);
 		seq_printf(m, "[%u]: %s\n", i, path);
 		++i;
 
