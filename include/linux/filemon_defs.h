@@ -73,9 +73,9 @@ enum filemon_type {
 
 struct filemon_info {
         struct list_head fi_dirty;  /* membership in the corresponding dirty list */
-	struct timespec  fi_ctime;  /* timestamp of last dirtifying */
-	pid_t            fi_fpid;   /* pid of last dirtifying process */
-	unsigned int     fi_fflags; /* filemon flags (see above defines) */
+	uint64_t fi_ctime;
+	unsigned int fi_fflags; /* filemon flags (see above defines) */
+	unsigned int fi_lastflag;
 #ifdef CONFIG_FILEMON_COUNTERS
 	int              fi_counter[FM_MAX];
 #endif
