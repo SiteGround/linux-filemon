@@ -114,10 +114,11 @@ void d_dirtify(struct dentry *dentry, int flag_bit)
 	    && strcmp(dentry->d_sb->s_type->name, "nfs4"))
 		goto unpin;
 
-	// now we remember what we want to know later...
+
+	/* Record what interests us */
 	info = &dentry->d_filemon;
-	info->fi_ctime = current_kernel_time();
-	info->fi_fpid = current->pid;
+	info->fi_ctime = ktime_get_real_ns(); 
+	info->fi_lastflag = (1 << flag_bit);
 	info->fi_fflags |= (1u << flag_bit);
 #ifdef CONFIG_FILEMON_COUNTERS
 	info->fi_counter[flag_bit]++;
@@ -271,6 +272,7 @@ static int filemon_seq_show(struct seq_file *s, void *v)
 	struct filemon_iter_state *iter= v;
 	struct path path;
 	char *path_buf;
+	struct timespec time;
 	int ret = -EFAULT;
 
 	path_for_dentry(iter->dentry, &path);
@@ -282,11 +284,12 @@ static int filemon_seq_show(struct seq_file *s, void *v)
 	if (IS_ERR(path_buf))
 		goto out;
 
+	time = ns_to_timespec((s64)iter->metadata.fi_ctime);
 	seq_printf(s, "[%lld] %-2ld.%09ld %08x %-12s\n",
 	        iter->pos,
-	        (unsigned long)iter->metadata.fi_ctime.tv_sec,
-	        iter->metadata.fi_ctime.tv_nsec,
-	        iter->metadata.fi_fflags,
+	        (unsigned long)time.tv_sec,
+	        time.tv_nsec,
+	        iter->metadata.fi_lastflag,
 	        path_buf);
 	ret = 0;
 
