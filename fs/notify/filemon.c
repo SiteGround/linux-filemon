@@ -34,6 +34,7 @@
 #include <linux/fs.h>
 #include <linux/rculist.h>
 #include <linux/mount.h>
+#include <linux/capability.h>
 
 /* Protects all procfs interactions */
 static DEFINE_MUTEX(filemon_proc_mutex);
@@ -309,6 +310,9 @@ static ssize_t filemon_enabled_write(struct file *file, const char __user *buf,
 	char tmp[4];
 	unsigned long tmp_number;
 
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
 	if (count > sizeof(tmp))
 		count = sizeof(tmp);
 
@@ -339,6 +343,9 @@ static ssize_t filemon_listlimit_write(struct file *file, const char __user *buf
 	char tmp[4];
 	unsigned long tmp_number;
 
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
 	mutex_lock(&filemon_proc_mutex);
 	if (count > sizeof(tmp))
 		count = sizeof(tmp);
@@ -363,6 +370,10 @@ out:
 static inline int filemon_listlimit_show(struct seq_file *m, void *v)
 {
 	int ret;
+
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
 	mutex_lock(&filemon_proc_mutex);
 	ret = seq_printf(m, "%lu\n", filemon_listlimit);
 	mutex_unlock(&filemon_proc_mutex);
@@ -372,6 +383,9 @@ static inline int filemon_listlimit_show(struct seq_file *m, void *v)
 
 static inline int filemon_listlimit_open(struct inode *inode, struct file *file)
 {
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
 	return single_open(file, filemon_listlimit_show, NULL);
 }
 
@@ -387,6 +401,9 @@ static inline int filemon_dirtycount_show(struct seq_file *m, void *v)
 
 static inline int filemon_dirtycount_open(struct inode *inode, struct file *file)
 {
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
 	return single_open(file, filemon_dirtycount_show, NULL);
 }
 
@@ -395,6 +412,9 @@ static ssize_t filemon_mask_write(struct file *file, const char __user *buf,
 {
 	char tmp[4];
 	unsigned long tmp_number;
+
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
 
 	if (count > sizeof(tmp))
 		count = sizeof(tmp);
@@ -417,6 +437,9 @@ static inline int filemon_mask_show(struct seq_file *m, void *v)
 
 static inline int filemon_mask_open(struct inode *inode, struct file *file)
 {
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
 	return single_open(file, filemon_mask_show, NULL);
 }
 
@@ -426,6 +449,10 @@ static ssize_t filemon_filter_write(struct file *file, const char __user *buf,
 	char *tmp, *new_line;
 	struct filemon_dir_entry *dir;
 	ssize_t ret = -EFAULT;
+
+
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
 
 	mutex_lock(&filemon_proc_mutex);
 	if (count >= PAGE_SIZE)
@@ -490,6 +517,9 @@ static inline int filemon_filter_show(struct seq_file *m, void *v)
 {
 	struct filemon_dir_entry *entry;
 
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
 	mutex_lock(&filemon_proc_mutex);
 	rcu_read_lock();
 	list_for_each_entry_rcu(entry, &filemon_dir_list, entry) {
@@ -503,6 +533,9 @@ static inline int filemon_filter_show(struct seq_file *m, void *v)
 
 static inline int filemon_filter_open(struct inode *inode, struct file *file)
 {
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
 	return single_open(file, filemon_filter_show, NULL);
 }
 
@@ -522,6 +555,9 @@ static ssize_t filemon_filterdel_write(struct file *file, const char __user *buf
 	char tmp[4];
 	uint32_t id;
 	struct filemon_dir_entry *entry;
+
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
 
 	if (count > sizeof(tmp))
 		count = sizeof(tmp);
@@ -595,11 +631,11 @@ static const struct seq_operations filemon_seq_ops = {
 
 static int filemon_buffer_open(struct inode* inode, struct file *file)
 {
-	if (filemon_enabled)
+	if (filemon_enabled && capable(CAP_LXC_ADMIN))
 		return seq_open_private(file, &filemon_seq_ops,
 					sizeof(struct filemon_iter_state));
 
-	return -EACCES;
+	return -EPERM;
 }
 
 
