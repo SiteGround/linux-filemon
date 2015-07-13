@@ -47,9 +47,12 @@ struct filemon_base filemon_dirty_list = {
 /* This lock protects only the write-side critical section */
 static DEFINE_SPINLOCK(filemon_dir_lock);
 static LIST_HEAD(filemon_dir_list);
+static uint32_t global_dir_entry_id = 0;
 struct filemon_dir_entry {
 	struct file *file;
 	struct list_head entry;
+	uint32_t id;
+	struct rcu_head rcu;
 };
 
 //this is eclusion mask. 
@@ -462,6 +465,7 @@ static ssize_t filemon_filter_write(struct file *file, const char __user *buf,
 		ret = PTR_ERR(dir->file);
 		goto out_free_mem;
 	}
+	dir->id = global_dir_entry_id++;
 
 	spin_lock(&filemon_dir_lock);
 	list_add_tail_rcu(&dir->entry, &filemon_dir_list);
@@ -484,16 +488,13 @@ unlock:
 
 static inline int filemon_filter_show(struct seq_file *m, void *v)
 {
-	uint32_t i = 0;
 	struct filemon_dir_entry *entry;
 
 	mutex_lock(&filemon_proc_mutex);
 	rcu_read_lock();
 	list_for_each_entry_rcu(entry, &filemon_dir_list, entry) {
 		char *path = d_absolute_path(&entry->file->f_path, str_scratch, PATH_MAX);
-		seq_printf(m, "[%u]: %s\n", i, path);
-		++i;
-
+		seq_printf(m, "[%u]: %s\n", entry->id, path);
 	}
 	rcu_read_unlock();
 	mutex_unlock(&filemon_proc_mutex);
@@ -504,6 +505,47 @@ static inline int filemon_filter_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, filemon_filter_show, NULL);
 }
+
+static void filemon_free_dir_entry_rcu(struct rcu_head *rcu)
+{
+	struct filemon_dir_entry *entry;
+
+	entry = container_of(rcu, struct filemon_dir_entry, rcu);
+	WARN_ON(filp_close(entry->file, NULL));
+
+	kfree(entry);
+}
+
+static ssize_t filemon_filterdel_write(struct file *file, const char __user *buf,
+				    size_t count, loff_t *pos)
+{
+	char tmp[4];
+	uint32_t id;
+	struct filemon_dir_entry *entry;
+
+	if (count > sizeof(tmp))
+		count = sizeof(tmp);
+
+	if (copy_from_user(tmp, buf, count))
+		return -EFAULT;
+
+	if (kstrtouint(strstrip(tmp), 0, &id))
+		return -EINVAL;
+
+	mutex_lock(&filemon_proc_mutex);
+	list_for_each_entry(entry, &filemon_dir_list, entry) {
+		if (entry->id == id) {
+			list_del_rcu(&entry->entry);
+			call_rcu(&entry->rcu, filemon_free_dir_entry_rcu);
+		}
+	}
+	mutex_unlock(&filemon_proc_mutex);
+
+	return count;
+}
+static const struct file_operations proc_filemon_filterdel_ops = {
+	.write = filemon_filterdel_write,
+};
 
 static const struct file_operations proc_filemon_filter_ops = {
 	.open = filemon_filter_open,
@@ -575,6 +617,7 @@ static int proc_filemon_init(void)
 
 	proc_create("buffer", 0, filemon_dir, &proc_filemon_buffer_ops);
 	proc_create("path_filter", 0, filemon_dir, &proc_filemon_filter_ops);
+	proc_create("path_filter_delete", 0, filemon_dir, &proc_filemon_filterdel_ops);
 	proc_create("excluded_events", 0, filemon_dir, &proc_filemon_mask_ops);
 	proc_create("dirty_count", 0, filemon_dir, &proc_filemon_dirtycount_ops);
 	proc_create("enabled", 0, filemon_dir, &proc_filemon_enabled_ops);
