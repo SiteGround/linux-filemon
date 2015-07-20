@@ -6,10 +6,14 @@
  * masses of ORPHAN INODES!
  *
  * Copyright (C) 2012 1&1 Internet AG - http://www.1und1.de
+ * Copyright (C) 2015 Siteground LLC - http://www.siteground.com
  *
- * Authors:
+ * Original Authors:
  * Stela Suciu <stela.suciu@gmail.com>, <stela.suciu@1and1.ro>
  * Thomas Schoebel-Theuer <thomas.schoebel-theuer@1und1.de>
+ *
+ * Major rework:
+ * Nikolay Borisov <n.borisov@siteground.com>
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -220,15 +224,16 @@ static void *filemon_seq_start(struct seq_file *s, loff_t *pos)
 	return iter;
 }
 
-
-static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
+static void filemon_dput(struct filemon_iter_state *iter)
 {
-
-	/* When we are here we need to free the current entry and then 
-	 * get another one
+	/* Put the extra ref that we have taken when this
+	 * dentry was put into the dirty list
 	 */
-	struct filemon_iter_state *iter = v;
-	pr_debug("[filemon_seq_next]\n");
+
+	if (iter == NULL)
+		return;
+
+	dput(iter->dentry);
 
 	/* Handle the case where we have copied a very 
 	 * long file name
@@ -239,11 +244,18 @@ static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
 		if (old_name && (atomic_dec_and_test(&old_name->u.count)))
 			kfree_rcu(old_name, u.head);
 	}
+}
 
-	/* Put the extra ref that we have taken when this
-	 * dentry was put into the dirty list
+static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+
+	/* When we are here we need to free the current entry and then 
+	 * get another one
 	 */
-	dput(iter->dentry);
+	struct filemon_iter_state *iter = v;
+	pr_debug("[filemon_seq_next]\n");
+
+	filemon_dput(iter);
 
 	if (filemon_listlimit && iter->pos >= filemon_listlimit - 1) {
 		pr_debug("%s: listlimit reached. idx = %lld\n", __func__, iter->pos);
@@ -254,7 +266,6 @@ static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
 	*pos += 1;
 	iter->pos = *pos;
 
-
 	if (!iter->dentry)
 		return NULL;
 
@@ -263,7 +274,10 @@ static void *filemon_seq_next(struct seq_file *s, void *v, loff_t *pos)
 
 static void filemon_seq_stop(struct seq_file *s, void *v)
 {
+	struct filemon_iter_state *iter = v;
+
 	filemon_enabled = false;
+	filemon_dput(iter);
 	mutex_unlock(&filemon_proc_mutex);
 	pr_debug("==================[filemon_seq_stop]====================\n");
 }
