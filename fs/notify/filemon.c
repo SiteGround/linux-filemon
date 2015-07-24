@@ -308,17 +308,17 @@ static ssize_t filemon_enabled_write(struct file *file, const char __user *buf,
 				     size_t count, loff_t *pos)
 {
 	char tmp[4];
+	size_t buf_size;
 	unsigned long tmp_number;
 
 	if (!capable(CAP_LXC_ADMIN))
 		return -EPERM;
 
-	if (count > sizeof(tmp))
-		count = sizeof(tmp);
-
-	if (copy_from_user(tmp, buf, count))
+	buf_size = min(count, (sizeof(tmp)-1));
+	if (copy_from_user(tmp, buf, buf_size))
 		return -EFAULT;
 
+	tmp[buf_size] = '\0';
 	if (kstrtoul(strstrip(tmp), 0, &tmp_number))
 		return -EINVAL;
 
