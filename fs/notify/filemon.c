@@ -64,10 +64,35 @@ struct filemon_dir_entry {
 unsigned int filemon_exclusion_mask = FILEMON_OPEN | FILEMON_CLOSE | FILEMON_READ | FILEMON_STAT | FILEMON_READDIR | FILEMON_FLOCK | FILEMON_PLOCK;
 
 /* Access to this scratch space is also protected by filemon_proc_mutex */
-static char str_scratch[PATH_MAX];
+static size_t scratch_size = 8192;
+static char *scratch_buffer;
+static bool initialised = false;
 static bool filemon_enabled = false;
 static unsigned long filemon_listlimit = 0;
 
+extern void path_for_dentry(struct dentry *dentry, struct path *path);
+/*
+ * Try to resolve the path of the given dentry into the buffer
+ * Give it one chance to realloc the buffer in case the path is really 
+ * big
+ */
+static char *print_path(struct dentry *dentry, char *buf, int buf_size) {
+
+	char *path_buf;
+	struct path path;
+
+	path_for_dentry(dentry, &path);
+
+	BUG_ON(path.dentry != dentry);
+
+	path_buf = d_absolute_path(&path, buf, buf_size);
+
+	WARN_ON_ONCE(IS_ERR(path_buf) && PTR_ERR(path_buf) == -ENAMETOOLONG);
+
+	path_put(&path);
+
+	return path_buf;
+}
 
 static bool should_log(struct dentry *target, int flag_bit)
 {
@@ -99,15 +124,18 @@ static bool should_log(struct dentry *target, int flag_bit)
  */
 void d_dirtify(struct dentry *dentry, int flag_bit)
 {
-	struct dentry *unpin = dentry;
+	struct dentry *unpin;
 	struct filemon_info *info;
-	if (flag_bit < 0 || flag_bit >= FM_MAX)
-		BUG();
+
+	if (unlikely(!initialised))
+		return;
+
+	BUG_ON(flag_bit < 0 || flag_bit >= FM_MAX);
 
 	if ((1u << flag_bit) & filemon_exclusion_mask)
 		return;
 
-	dget(dentry);
+	unpin = dget(dentry);
 
 	if (!should_log(dentry, flag_bit))
 		goto unpin;
@@ -122,10 +150,9 @@ void d_dirtify(struct dentry *dentry, int flag_bit)
 	    && strcmp(dentry->d_sb->s_type->name, "nfs4"))
 		goto unpin;
 
-
 	/* Record what interests us */
 	info = &dentry->d_filemon;
-	info->fi_ctime = ktime_get_real_ns(); 
+	info->fi_ctime = ktime_get_real_ns();
 	info->fi_lastflag = (1 << flag_bit);
 	info->fi_fflags |= (1u << flag_bit);
 #ifdef CONFIG_FILEMON_COUNTERS
@@ -283,24 +310,19 @@ static void filemon_seq_stop(struct seq_file *s, void *v)
 }
 
 
-extern void path_for_dentry(struct dentry *dentry, struct path *path);
 
 static int filemon_seq_show(struct seq_file *s, void *v)
 {
 	struct filemon_iter_state *iter= v;
-	struct path path;
-	char *path_buf;
 	struct timespec time;
-	int ret = -EFAULT;
+	char *path_buf;
 
-	path_for_dentry(iter->dentry, &path);
-
-	BUG_ON(path.dentry != iter->dentry);
-
-	path_buf = d_absolute_path(&path, str_scratch, PATH_MAX);
 	pr_debug("filemon_seq_show\n");
+
+	path_buf = print_path(iter->dentry, scratch_buffer, scratch_size);
+
 	if (IS_ERR(path_buf))
-		goto out;
+		return 0;
 
 	time = ns_to_timespec((s64)iter->metadata.fi_ctime);
 	seq_printf(s, "[%lld] %-2ld.%09ld %08x %-12s\n",
@@ -309,12 +331,8 @@ static int filemon_seq_show(struct seq_file *s, void *v)
 	        time.tv_nsec,
 	        iter->metadata.fi_lastflag,
 	        path_buf);
-	ret = 0;
 
-out:
-	path_put(&path);
-
-	return ret;
+	return 0;
 }
 
 
@@ -399,6 +417,59 @@ static inline int filemon_listlimit_open(struct inode *inode, struct file *file)
 
 	return single_open(file, filemon_listlimit_show, NULL);
 }
+
+
+static ssize_t filemon_path_write(struct file *file, const char __user *buf,
+				     size_t count, loff_t *pos)
+{
+	char buffer[16];
+	size_t buf_size;
+	unsigned long tmp_number;
+
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
+	buf_size = min(count, (sizeof(buffer)-1));
+	if (copy_from_user(buffer, buf, buf_size))
+		count = -EFAULT;
+
+	buffer[buf_size] = '\0';
+	if (kstrtoul(strstrip(buffer), 0, &tmp_number))
+		count = -EINVAL;
+
+	mutex_lock(&filemon_proc_mutex);
+	scratch_size = tmp_number;
+	kfree(scratch_buffer);
+	scratch_buffer = kzalloc(scratch_size, GFP_KERNEL);
+	mutex_unlock(&filemon_proc_mutex);
+
+	BUG_ON(!scratch_buffer);
+
+	return count;
+}
+
+static inline int filemon_path_show(struct seq_file *m, void *v)
+{
+	int ret;
+
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
+	mutex_lock(&filemon_proc_mutex);
+	ret = seq_printf(m, "%lu\n", scratch_size);
+	mutex_unlock(&filemon_proc_mutex);
+
+	return ret;
+}
+
+static inline int filemon_path_open(struct inode *inode, struct file *file)
+{
+	if (!capable(CAP_LXC_ADMIN))
+		return -EPERM;
+
+	return single_open(file, filemon_path_show, NULL);
+}
+
 
 static inline int filemon_dirtycount_show(struct seq_file *m, void *v)
 {
@@ -536,7 +607,8 @@ static inline int filemon_filter_show(struct seq_file *m, void *v)
 	mutex_lock(&filemon_proc_mutex);
 	rcu_read_lock();
 	list_for_each_entry_rcu(entry, &filemon_dir_list, entry) {
-		char *path = d_absolute_path(&entry->file->f_path, str_scratch, PATH_MAX);
+		char *path = d_absolute_path(&entry->file->f_path,
+					     scratch_buffer, scratch_size);
 		seq_printf(m, "[%u]: %s\n", entry->id, path);
 	}
 	rcu_read_unlock();
@@ -661,11 +733,24 @@ static const struct file_operations proc_filemon_buffer_ops = {
 };
 
 
+static const struct file_operations proc_filemon_path_ops = {
+	.open = filemon_path_open,
+	.read = seq_read,
+	.write = filemon_path_write,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+
 static int proc_filemon_init(void)
 {
 	struct proc_dir_entry *filemon_dir = proc_mkdir("filemon", NULL);
 
+	scratch_buffer = kzalloc(scratch_size, GFP_KERNEL);
+	BUG_ON(!scratch_buffer);
+
 	proc_create("buffer", 0, filemon_dir, &proc_filemon_buffer_ops);
+	proc_create("path_length", 0, filemon_dir, &proc_filemon_path_ops);
 	proc_create("path_filter", 0, filemon_dir, &proc_filemon_filter_ops);
 	proc_create("path_filter_delete", 0, filemon_dir, &proc_filemon_filterdel_ops);
 	proc_create("excluded_events", 0, filemon_dir, &proc_filemon_mask_ops);
@@ -673,6 +758,8 @@ static int proc_filemon_init(void)
 	proc_create("enabled", 0, filemon_dir, &proc_filemon_enabled_ops);
 	proc_create("listing_limit", 0, filemon_dir,
 		    &proc_filemon_listlimit_ops);
+
+	initialised = true;
 	return 0;
 }
 late_initcall(proc_filemon_init);
