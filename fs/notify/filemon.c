@@ -339,20 +339,15 @@ static int filemon_seq_show(struct seq_file *s, void *v)
 static ssize_t filemon_enabled_write(struct file *file, const char __user *buf,
 				     size_t count, loff_t *pos)
 {
-	char tmp[4];
 	unsigned long tmp_number;
+	int ret;
 
 	if (!capable(CAP_LXC_ADMIN))
 		return -EPERM;
 
-	if (count > sizeof(tmp))
-		count = sizeof(tmp);
-
-	if (copy_from_user(tmp, buf, count))
-		return -EFAULT;
-
-	if (kstrtoul(strstrip(tmp), 0, &tmp_number))
-		return -EINVAL;
+	ret = kstrtoul_from_user(buf, count, 10, &tmp_number);
+	if (ret)
+		return ret;
 
 	mutex_lock(&filemon_proc_mutex);
 	filemon_enabled = tmp_number ? true : false;
@@ -374,20 +369,15 @@ static inline int filemon_enabled_open(struct inode *inode, struct file *file)
 static ssize_t filemon_listlimit_write(struct file *file, const char __user *buf,
 				     size_t count, loff_t *pos)
 {
-	char buffer[16];
-	size_t buf_size;
 	unsigned long tmp_number;
+	int ret;
 
 	if (!capable(CAP_LXC_ADMIN))
 		return -EPERM;
 
-	buf_size = min(count, (sizeof(buffer)-1));
-	if (copy_from_user(buffer, buf, buf_size))
-		count = -EFAULT;
-
-	buffer[buf_size] = '\0';
-	if (kstrtoul(strstrip(buffer), 0, &tmp_number))
-		count = -EINVAL;
+	ret = kstrtoul_from_user(buf, count, 10, &tmp_number);
+	if (ret)
+		return ret;
 
 	mutex_lock(&filemon_proc_mutex);
 	filemon_listlimit = tmp_number;
@@ -422,20 +412,15 @@ static inline int filemon_listlimit_open(struct inode *inode, struct file *file)
 static ssize_t filemon_path_write(struct file *file, const char __user *buf,
 				     size_t count, loff_t *pos)
 {
-	char buffer[16];
-	size_t buf_size;
+	int ret;
 	unsigned long tmp_number;
 
 	if (!capable(CAP_LXC_ADMIN))
 		return -EPERM;
 
-	buf_size = min(count, (sizeof(buffer)-1));
-	if (copy_from_user(buffer, buf, buf_size))
-		count = -EFAULT;
-
-	buffer[buf_size] = '\0';
-	if (kstrtoul(strstrip(buffer), 0, &tmp_number))
-		count = -EINVAL;
+	ret = kstrtoul_from_user(buf, count, 10, &tmp_number);
+	if (ret)
+		return ret;
 
 	mutex_lock(&filemon_proc_mutex);
 	scratch_size = tmp_number;
@@ -492,20 +477,15 @@ static inline int filemon_dirtycount_open(struct inode *inode, struct file *file
 static ssize_t filemon_mask_write(struct file *file, const char __user *buf,
 				     size_t count, loff_t *pos)
 {
-	char buffer[16];
-	size_t buf_size;
 	unsigned long tmp_number;
+	int ret;
 
 	if (!capable(CAP_LXC_ADMIN))
 		return -EPERM;
 
-	buf_size = min(count, (sizeof(buffer)-1));
-	if (copy_from_user(buffer, buf, buf_size))
-		return -EFAULT;
-
-	buffer[buf_size] = '\0';
-	if (kstrtoul(strstrip(buffer), 0, &tmp_number))
-		return -EINVAL;
+	ret = kstrtoul_from_user(buf, count, 10, &tmp_number);
+	if (ret)
+		return ret;
 
 	mutex_lock(&filemon_proc_mutex);
 	filemon_exclusion_mask = tmp_number;
@@ -637,22 +617,17 @@ static void filemon_free_dir_entry_rcu(struct rcu_head *rcu)
 static ssize_t filemon_filterdel_write(struct file *file, const char __user *buf,
 				    size_t count, loff_t *pos)
 {
-	char buffer[16];
 	size_t buf_size;
-	uint32_t id;
+	unsigned long id;
+	int ret;
 	struct filemon_dir_entry *entry;
 
 	if (!capable(CAP_LXC_ADMIN))
 		return -EPERM;
 
-	buf_size = min(count, (sizeof(buffer)-1));
-	if (copy_from_user(buffer, buf, buf_size))
-		return -EFAULT;
-
-	buffer[buf_size] = '\0';
-
-	if (kstrtouint(strstrip(buffer), 0, &id))
-		return -EINVAL;
+	ret = kstrtoul_from_user(buf, count, 10, &id);
+	if (ret)
+		return ret;
 
 	mutex_lock(&filemon_proc_mutex);
 	list_for_each_entry(entry, &filemon_dir_list, entry) {
